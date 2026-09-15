@@ -76,7 +76,7 @@ const LoginPage = ({ onLogin }) => {
         >
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 10 }}>
-              <img src="/agt_logo.png" alt="AGT" style={{ height: '40px' }} />
+              <img src="/agt_logo.svg" alt="AGT" style={{ height: '40px' }} />
             </Box>
 
             <Box sx={{ maxWidth: 440 }}>
@@ -153,7 +153,7 @@ const LoginPage = ({ onLogin }) => {
       >
         {isMobile && (
           <Box sx={{ textAlign: 'center', mb: 4 }}>
-            <img src="/agt_logo.png" alt="AGT" style={{ height: '40px' }} />
+            <img src="/agt_logo.svg" alt="AGT" style={{ height: '40px' }} />
           </Box>
         )}
 
