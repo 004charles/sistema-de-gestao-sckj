@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200" width="600" height="200">
+  <defs>
+    <clipPath id="gearClip">
+      <circle cx="90" cy="100" r="70"/>
+    </clipPath>
+  </defs>
+  
+  <!-- Gear/Cogwheel -->
+  <g transform="translate(90, 100)">
+    <!-- Outer gear teeth -->
+    <path d="M0,-80 L12,-78 L18,-65 L25,-70 L35,-60 L30,-50 L40,-42 L48,-52 L58,-38 L50,-30 L58,-18 L65,-25 L70,-10 L62,-2 L68,12 L75,5 L72,22 L62,18 L65,35 L72,38 L62,50 L55,42 L52,58 L60,62 L48,68 L45,58 L35,65 L38,75 L25,72 L22,62 L10,68 L8,78 L-5,72 L-2,62 L-15,68 L-18,78 L-30,72 L-25,60 L-38,65 L-42,55 L-52,60 L-55,48 L-48,42 L-58,32 L-62,40 L-68,25 L-58,20 L-65,5 L-58,0 L-62,-18 L-52,-15 L-55,-32 L-45,-28 L-42,-45 L-35,-38 L-25,-52 L-30,-58 L-15,-62 L-12,-52 L0,-65 Z" 
+          fill="#0052A5" stroke="none"/>
+    <!-- Inner circle -->
+    <circle cx="0" cy="0" r="45" fill="#FFFFFF"/>
+    <!-- Inner gear ring -->
+    <circle cx="0" cy="0" r="38" fill="none" stroke="#0052A5" stroke-width="3"/>
+  </g>
+  
+  <!-- Star -->
+  <polygon points="90,55 95,70 110,70 98,80 102,95 90,85 78,95 82,80 70,70 85,70" 
+           fill="#0052A5"/>
+  
+  <!-- AGT Text -->
+  <text x="200" y="105" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="bold" fill="#0052A5" letter-spacing="2">AGT</text>
+  
+  <!-- Divider line -->
+  <line x1="195" y1="50" x2="195" y2="150" stroke="#CCCCCC" stroke-width="1"/>
+  
+  <!-- ADMINISTRAÇÃO -->
+  <text x="215" y="78" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#555555" letter-spacing="1">ADMINISTRAÇÃO</text>
+  
+  <!-- GERAL -->
+  <text x="215" y="108" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#555555" letter-spacing="1">GERAL</text>
+  
+  <!-- TRIBUTÁRIA -->
+  <text x="215" y="138" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#555555" letter-spacing="1">TRIBUTÁRIA</text>
+</svg>

@@ -1,0 +1,18 @@
+==========================================
+RELATÓRIO DE ERROS - seg. 14 set 2026 14:44:41 WAT
+==========================================
+
+STATUS DOS SERVIDORES:
+  Backend: ATIVO
+  Frontend: ATIVO
+
+PORTAS:
+  8000: ATIVA
+  3000: ATIVA
+
+API:
+  HTTP Status: 200
+
+ÚLTIMOS ERROS:
+
+ERROS GROQ:
