@@ -60,6 +60,20 @@ const MainLayout = ({ children }) => {
 
   const drawer = (
     <Box sx={{ width: DRAWER_WIDTH, height: '100%', backgroundColor: '#FFFFFF' }}>
+      {/* Logo */}
+      <Box
+        sx={{
+          px: 3,
+          py: 3,
+          borderBottom: '1px solid #E2E8F0',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <img src="/agt_logo.png" alt="AGT" style={{ height: '40px' }} />
+      </Box>
+
       {/* Menu */}
       <List sx={{ px: 2, pt: 3 }}>
         {menuItems.map((item) => {
