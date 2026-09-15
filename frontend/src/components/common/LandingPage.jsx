@@ -26,7 +26,7 @@ const LandingPage = () => {
         <Container maxWidth="lg">
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', py: 1.5, px: { xs: 1, sm: 2 } }}>
             <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <img src="/agt_logo.svg" alt="AGT" style={{ height: '28px' }} />
+              <img src="/agt_logo.png" alt="AGT" style={{ height: '28px' }} />
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 2 } }}>
               <Box sx={{ display: 'flex', gap: 0.5 }}>
@@ -97,7 +97,7 @@ const LandingPage = () => {
         <Container maxWidth="md" disableGutters>
           <Box sx={{ display: 'flex', justifyContent: 'center', mb: { xs: 4, md: 6 }, gap: { xs: 2, sm: 3 }, alignItems: 'center', flexWrap: 'wrap' }}>
             <Box sx={{ width: { xs: 80, sm: 100, md: 140 }, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src="/agt_logo.svg" alt="AGT" style={{ width: '100%', height: 'auto' }} />
+              <img src="/agt_logo.png" alt="AGT" style={{ width: '100%', height: 'auto' }} />
             </Box>
             <Box sx={{ width: { xs: 120, sm: 160, md: 220 }, height: { xs: 70, sm: 90, md: 130 }, borderRadius: '12px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,61,153,0.1)' }}>
               <img src="/contabilidade.jpeg" alt="Contabilidade" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -246,7 +246,7 @@ const LandingPage = () => {
         <Container maxWidth="lg" sx={{ px: { xs: 2, sm: 3 } }}>
           <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              <img src="/agt_logo.svg" alt="AGT" style={{ height: '20px', opacity: 0.4 }} />
+              <img src="/agt_logo.png" alt="AGT" style={{ height: '20px', opacity: 0.4 }} />
               <Typography sx={{ color: '#94A3B8', fontSize: { xs: '11px', sm: '12px' } }}>
                 {t('landing.footer')}
               </Typography>

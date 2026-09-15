@@ -71,7 +71,7 @@ const MainLayout = ({ children }) => {
           justifyContent: 'center',
         }}
       >
-        <img src="/agt_logo.svg" alt="AGT" style={{ height: '40px' }} />
+        <img src="/agt_logo.png" alt="AGT" style={{ height: '40px' }} />
       </Box>
 
       {/* Menu */}

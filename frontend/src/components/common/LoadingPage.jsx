@@ -126,7 +126,7 @@ const LoadingPage = ({ onComplete }) => {
           }}
         >
           <img
-            src="/agt_logo.svg"
+            src="/agt_logo.png"
             alt="AGT"
             style={{
               width: isMobile ? '70px' : '85px',
