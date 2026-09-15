@@ -12,10 +12,6 @@ import {
   FormControlLabel,
   useMediaQuery,
   useTheme,
-  MenuItem,
-  Select,
-  InputLabel,
-  FormControl,
 } from '@mui/material';
 import Visibility from '@mui/icons-material/Visibility';
 import VisibilityOff from '@mui/icons-material/VisibilityOff';

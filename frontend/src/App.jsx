@@ -21,7 +21,7 @@ function ProtectedRoute({ children }) {
 }
 
 function App() {
-  const [authenticated, setAuthenticated] = useState(false);
+  const [, setAuthenticated] = useState(false);
 
   useEffect(() => {
     const user = localStorage.getItem('user');

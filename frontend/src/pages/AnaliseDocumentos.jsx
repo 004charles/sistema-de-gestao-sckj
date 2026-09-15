@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Typography,
@@ -77,7 +77,7 @@ const AnaliseDocumentos = () => {
           campos.push(campoAtual);
         }
         campoAtual = {
-          nome: linhaTrim.replace(/[\[\]【】]/g, ''),
+          nome: linhaTrim.replace(/[[\]【】]/g, ''),
           valores: [],
           status: 'pending',
         };
