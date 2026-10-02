@@ -1,16 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { ThemeProvider, CssBaseline } from '@mui/material';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import theme from './styles/theme';
-import GlobalStyle from './styles/GlobalStyle';
-import LandingPage from './components/common/LandingPage';
+import './styles/template.css';
 import LoginPage from './components/auth/LoginPage';
 import MainLayout from './components/common/MainLayout';
-import AnaliseDocumentos from './pages/AnaliseDocumentos';
 import Dashboard from './pages/Dashboard';
-import HistoricoAnalises from './pages/HistoricoAnalises';
+import Empresas from './pages/Empresas';
+import Configuracoes from './pages/Configuracoes';
+import Documentos from './pages/Documentos';
+import Motores from './pages/Motores';
+import Relatorios from './pages/Relatorios';
+import { PeriodoProvider } from './context/PeriodoContext';
 
 function ProtectedRoute({ children }) {
   const user = localStorage.getItem('user');
@@ -20,20 +21,14 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+function RootRoute() {
+  const user = localStorage.getItem('user');
+  return user ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />;
+}
+
 function App() {
-  const [, setAuthenticated] = useState(false);
-
-  useEffect(() => {
-    const user = localStorage.getItem('user');
-    if (user) {
-      setAuthenticated(true);
-    }
-  }, []);
-
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <GlobalStyle />
+    <>
       <ToastContainer
         position="top-right"
         autoClose={3000}
@@ -47,19 +42,11 @@ function App() {
         theme="colored"
       />
       <Router>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/login" element={<LoginPage onLogin={() => setAuthenticated(true)} />} />
-          <Route
-            path="/home"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Dashboard />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
+        <PeriodoProvider>
+          <Routes>
+          <Route path="/" element={<RootRoute />} />
+          <Route path="/login" element={<LoginPage onLogin={() => {}} />} />
+          <Route path="/home" element={<Navigate to="/dashboard" replace />} />
           <Route
             path="/dashboard"
             element={
@@ -71,29 +58,83 @@ function App() {
             }
           />
           <Route
-            path="/analise"
+            path="/empresas"
             element={
               <ProtectedRoute>
                 <MainLayout>
-                  <AnaliseDocumentos />
+                  <Empresas />
+                </MainLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route path="/analise" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/historico" element={<Navigate to="/dashboard" replace />} />
+          <Route
+            path="/configuracoes"
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <Configuracoes />
                 </MainLayout>
               </ProtectedRoute>
             }
           />
           <Route
-            path="/historico"
+            path="/perfil"
             element={
               <ProtectedRoute>
                 <MainLayout>
-                  <HistoricoAnalises />
+                  <Configuracoes />
+                </MainLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/documentos"
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <Documentos />
+                </MainLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/motores"
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <Motores />
+                </MainLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/motores/:codigo"
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <Motores />
+                </MainLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route path="/reconciliacao" element={<Navigate to="/motores/M1" replace />} />
+          <Route
+            path="/relatorios"
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <Relatorios />
                 </MainLayout>
               </ProtectedRoute>
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+          </Routes>
+        </PeriodoProvider>
       </Router>
-    </ThemeProvider>
+    </>
   );
 }
 

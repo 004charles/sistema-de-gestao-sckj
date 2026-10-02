@@ -1,263 +1,297 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Box, Typography, Button, Container } from '@mui/material';
-import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+
+const LANGUAGES = [
+  { code: 'pt', label: 'PT' },
+  { code: 'en', label: 'EN' },
+  { code: 'zh', label: 'ZH' },
+];
 
 const LandingPage = () => {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
 
+  const features = [
+    {
+      icon: 'la la-chart-bar',
+      title: t('landing.feature1Title'),
+      desc: t('landing.feature1Desc'),
+    },
+    {
+      icon: 'la la-bolt',
+      title: t('landing.feature2Title'),
+      desc: t('landing.feature2Desc'),
+    },
+    {
+      icon: 'la la-chart-line',
+      title: t('landing.feature3Title'),
+      desc: t('landing.feature3Desc'),
+    },
+  ];
+
   return (
-    <Box sx={{ minHeight: '100vh', backgroundColor: '#FFFFFF' }}>
+    <main className="main-content" style={{ minHeight: '100vh', backgroundColor: '#ffffff' }}>
       {/* Nav */}
-      <Box
-        sx={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          zIndex: 100,
-          backgroundColor: 'rgba(255,255,255,0.9)',
-          backdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(0,0,0,0.06)',
-        }}
-      >
-        <Container maxWidth="lg">
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', py: 1.5, px: { xs: 1, sm: 2 } }}>
-            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <img src="/agt_logo.png" alt="AGT" style={{ height: '28px' }} />
-            </Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 2 } }}>
-              <Box sx={{ display: 'flex', gap: 0.5 }}>
-                {[
-                  { code: 'pt', label: 'PT' },
-                  { code: 'en', label: 'EN' },
-                  { code: 'zh', label: 'ZH' },
-                ].map((lang) => (
-                  <Box
-                    key={lang.code}
-                    onClick={() => i18n.changeLanguage(lang.code)}
-                    sx={{
-                      px: { xs: 1, sm: 1.5 },
-                      py: 0.5,
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      backgroundColor: i18n.language === lang.code ? '#F0F7FF' : 'transparent',
-                      border: `1px solid ${i18n.language === lang.code ? '#BFDBFE' : '#E2E8F0'}`,
-                      transition: 'all 0.15s',
-                      '&:hover': { borderColor: '#003D99' },
-                    }}
-                  >
-                    <Typography
-                      sx={{
-                        color: i18n.language === lang.code ? '#003D99' : '#64748B',
-                        fontWeight: i18n.language === lang.code ? 600 : 400,
-                        fontSize: '11px',
-                      }}
+      <header className="header-top">
+        <nav className="navbar navbar-light">
+          <div className="navbar-left">
+            <a
+              className="navbar-brand"
+              href="#landing"
+              onClick={(e) => e.preventDefault()}
+              style={{ marginRight: 12 }}
+            >
+              <img src="/logo.jpeg" alt="AGT" style={{ height: 32, width: 'auto' }} />
+            </a>
+          </div>
+          <div className="navbar-right">
+            <ul className="navbar-right__menu">
+              <li style={{ padding: '13px 6px' }}>
+                <div className="d-flex align-items-center" style={{ gap: 6 }}>
+                  {LANGUAGES.map((lang) => (
+                    <button
+                      key={lang.code}
+                      type="button"
+                      className={`btn btn-sm btn-squared ${
+                        i18n.language === lang.code
+                          ? 'btn-primary btn-default'
+                          : 'btn-default btn-white'
+                      }`}
+                      style={{ fontSize: 11, padding: '5px 9px', minWidth: 32 }}
+                      onClick={() => i18n.changeLanguage(lang.code)}
                     >
                       {lang.label}
-                    </Typography>
-                  </Box>
-                ))}
-              </Box>
-              <Button
-                onClick={() => navigate('/login')}
-                sx={{
-                  textTransform: 'none',
-                  fontWeight: 500,
-                  fontSize: { xs: '12px', sm: '14px' },
-                  color: '#003D99',
-                  '&:hover': { backgroundColor: '#F0F7FF' },
-                  minWidth: 'auto',
-                  px: { xs: 1, sm: 2 },
-                }}
-              >
-                {t('landing.navEnter')}
-              </Button>
-            </Box>
-          </Box>
-        </Container>
-      </Box>
+                    </button>
+                  ))}
+                </div>
+              </li>
+              <li style={{ padding: '13px 6px' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-default btn-squared"
+                  onClick={() => navigate('/login')}
+                >
+                  {t('landing.navEnter')} <i className="la la-arrow-right ml-10"></i>
+                </button>
+              </li>
+            </ul>
+          </div>
+        </nav>
+      </header>
 
       {/* Hero */}
-      <Box
-        sx={{
-          minHeight: '100vh',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          textAlign: 'center',
-          pt: 10,
-          pb: 4,
-          px: { xs: 2, sm: 3 },
-        }}
-      >
-        <Container maxWidth="md" disableGutters>
-          <Box sx={{ display: 'flex', justifyContent: 'center', mb: { xs: 4, md: 6 }, gap: { xs: 2, sm: 3 }, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Box sx={{ width: { xs: 80, sm: 100, md: 140 }, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src="/agt_logo.png" alt="AGT" style={{ width: '100%', height: 'auto' }} />
-            </Box>
-            <Box sx={{ width: { xs: 120, sm: 160, md: 220 }, height: { xs: 70, sm: 90, md: 130 }, borderRadius: '12px', overflow: 'hidden', boxShadow: '0 8px 30px rgba(0,61,153,0.1)' }}>
-              <img src="/contabilidade.jpeg" alt="Contabilidade" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            </Box>
-          </Box>
+      <section style={{ padding: '120px 0 90px', backgroundColor: '#ffffff' }}>
+        <div className="container">
+          <div className="row justify-content-center text-center">
+            <div className="col-lg-10">
+              <div
+                className="d-flex align-items-center justify-content-center flex-wrap mb-40"
+                style={{ gap: 24 }}
+              >
+                <div style={{ width: 140 }}>
+                  <img src="/logo.jpeg" alt="AGT" className="img-fluid" />
+                </div>
+                <div
+                  style={{
+                    width: 220,
+                    height: 130,
+                    borderRadius: 12,
+                    overflow: 'hidden',
+                    boxShadow: '0 8px 30px rgba(95,99,242,0.18)',
+                  }}
+                >
+                  <img
+                    src="/contabilidade.jpeg"
+                    alt="Contabilidade"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  />
+                </div>
+              </div>
 
-          <Typography
-            sx={{
-              color: '#003D99',
-              fontWeight: 600,
-              fontSize: { xs: '11px', sm: '13px' },
-              letterSpacing: '1px',
-              textTransform: 'uppercase',
-              mb: 2,
-            }}
-          >
-            {t('landing.heroTag')}
-          </Typography>
+              <p
+                className="color-primary text-uppercase fw-600 mb-20"
+                style={{ fontSize: 13, letterSpacing: '1.5px' }}
+              >
+                {t('landing.heroTag')}
+              </p>
 
-          <Typography
-            sx={{
-              color: '#0F172A',
-              fontWeight: 700,
-              fontSize: { xs: '32px', sm: '48px', md: '64px' },
-              lineHeight: 1.05,
-              letterSpacing: { xs: '-1px', md: '-2px' },
-              mb: 3,
-            }}
-          >
-            {t('landing.heroTitle1')}
-            <br />
-            {t('landing.heroTitle2')}{' '}
-            <Box component="span" sx={{ color: '#003D99' }}>
-              {t('landing.heroTitleHighlight')}
-            </Box>
-          </Typography>
-
-          <Typography
-            sx={{
-              color: '#64748B',
-              fontSize: { xs: '15px', sm: '17px', md: '20px' },
-              lineHeight: 1.6,
-              mb: 4,
-              maxWidth: 500,
-              mx: 'auto',
-            }}
-          >
-            {t('landing.heroDescription')}
-          </Typography>
-
-          <Button
-            variant="contained"
-            size="large"
-            onClick={() => navigate('/login')}
-            endIcon={<ArrowForwardIcon />}
-            sx={{
-              textTransform: 'none',
-              fontWeight: 600,
-              px: { xs: 4, sm: 5 },
-              py: { xs: 1.5, sm: 1.8 },
-              fontSize: { xs: '14px', sm: '16px' },
-              borderRadius: '100px',
-            }}
-          >
-            {t('landing.heroCta')}
-          </Button>
-        </Container>
-      </Box>
-
-      {/* Features */}
-      <Box sx={{ py: { xs: 8, sm: 10, md: 12 }, backgroundColor: '#FFFFFF' }}>
-        <Container maxWidth="lg" sx={{ px: { xs: 2, sm: 3 } }}>
-          <Box sx={{ textAlign: 'center', mb: { xs: 6, sm: 8, md: 10 } }}>
-            <Typography sx={{ color: '#003D99', fontWeight: 600, fontSize: { xs: '12px', sm: '14px' }, mb: 2 }}>
-              {t('landing.featuresTitle')}
-            </Typography>
-            <Typography sx={{ color: '#0F172A', fontWeight: 700, fontSize: { xs: '28px', sm: '36px', md: '44px' }, letterSpacing: '-1px' }}>
-              {t('landing.featuresSubtitle')}
-              <br />
-              <Box component="span" sx={{ color: '#003D99' }}>{t('landing.featuresSubtitleHighlight')}</Box>
-            </Typography>
-          </Box>
-
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(3, 1fr)' }, gap: { xs: 3, sm: 4 } }}>
-            {[
-              { icon: '📊', title: t('landing.feature1Title'), desc: t('landing.feature1Desc') },
-              { icon: '⚡', title: t('landing.feature2Title'), desc: t('landing.feature2Desc') },
-              { icon: '📈', title: t('landing.feature3Title'), desc: t('landing.feature3Desc') },
-            ].map((f, i) => (
-              <Box
-                key={i}
-                sx={{
-                  textAlign: 'center',
-                  p: { xs: 3, sm: 4, md: 5 },
-                  borderRadius: '16px',
-                  backgroundColor: '#F8FAFC',
-                  transition: 'all 0.3s ease',
-                  '&:hover': { backgroundColor: '#F0F7FF', transform: 'translateY(-4px)' },
+              <h1
+                className="color-dark fw-700 mb-25"
+                style={{
+                  fontSize: 'clamp(34px, 5vw, 64px)',
+                  lineHeight: 1.06,
+                  letterSpacing: '-1.5px',
                 }}
               >
-                <Typography sx={{ fontSize: { xs: '32px', sm: '36px', md: '40px' }, mb: 2 }}>{f.icon}</Typography>
-                <Typography sx={{ color: '#0F172A', fontWeight: 600, fontSize: { xs: '16px', sm: '17px', md: '18px' }, mb: 1.5 }}>
-                  {f.title}
-                </Typography>
-                <Typography sx={{ color: '#64748B', fontSize: { xs: '14px', sm: '15px' }, lineHeight: 1.6 }}>
-                  {f.desc}
-                </Typography>
-              </Box>
+                {t('landing.heroTitle1')}
+                <br />
+                {t('landing.heroTitle2')}{' '}
+                <span className="color-primary">{t('landing.heroTitleHighlight')}</span>
+              </h1>
+
+              <p
+                className="text-muted mx-auto mb-40"
+                style={{ maxWidth: 540, fontSize: 18, lineHeight: 1.65 }}
+              >
+                {t('landing.heroDescription')}
+              </p>
+
+              <button
+                type="button"
+                className="btn btn-primary btn-default btn-squared px-50 py-15"
+                onClick={() => navigate('/login')}
+              >
+                {t('landing.heroCta')} <i className="la la-arrow-right ml-10"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section style={{ padding: '80px 0', backgroundColor: '#f4f5f7' }}>
+        <div className="container">
+          <div className="row justify-content-center text-center mb-50">
+            <div className="col-lg-8">
+              <p
+                className="color-primary text-uppercase fw-600 mb-15"
+                style={{ fontSize: 13, letterSpacing: '1.5px' }}
+              >
+                {t('landing.featuresTitle')}
+              </p>
+              <h2
+                className="color-dark fw-700 mb-0"
+                style={{
+                  fontSize: 'clamp(28px, 3.5vw, 44px)',
+                  lineHeight: 1.15,
+                  letterSpacing: '-1px',
+                }}
+              >
+                {t('landing.featuresSubtitle')}{' '}
+                <span className="color-primary">{t('landing.featuresSubtitleHighlight')}</span>
+              </h2>
+            </div>
+          </div>
+
+          <div className="row">
+            {features.map((f, i) => (
+              <div className="col-md-4 mb-30" key={i}>
+                <div className="card" style={{ height: '100%' }}>
+                  <div className="card-body p-30 text-center">
+                    <div
+                      className="d-flex align-items-center justify-content-center mx-auto mb-20"
+                      style={{
+                        width: 64,
+                        height: 64,
+                        borderRadius: 12,
+                        backgroundColor: 'rgba(95,99,242,0.10)',
+                        color: '#5f63f2',
+                      }}
+                    >
+                      <i className={`la ${f.icon}`} style={{ fontSize: 26 }}></i>
+                    </div>
+                    <h5 className="color-dark fw-600 mb-10">{f.title}</h5>
+                    <p className="text-muted mb-0" style={{ fontSize: 15, lineHeight: 1.65 }}>
+                      {f.desc}
+                    </p>
+                  </div>
+                </div>
+              </div>
             ))}
-          </Box>
-        </Container>
-      </Box>
+          </div>
+        </div>
+      </section>
 
       {/* CTA */}
-      <Box sx={{ py: { xs: 8, sm: 10, md: 12 }, backgroundColor: '#FFFFFF' }}>
-        <Container maxWidth="md" sx={{ px: { xs: 2, sm: 3 } }}>
-          <Box sx={{ textAlign: 'center' }}>
-            <Typography sx={{ color: '#0F172A', fontWeight: 700, fontSize: { xs: '24px', sm: '32px', md: '40px' }, mb: 3, letterSpacing: '-1px' }}>
-              {t('landing.ctaTitle')}
-            </Typography>
-            <Typography sx={{ color: '#64748B', fontSize: { xs: '15px', sm: '16px', md: '17px' }, mb: 4, maxWidth: 400, mx: 'auto' }}>
-              {t('landing.ctaDescription')}
-            </Typography>
-            <Button
-              variant="contained"
-              size="large"
-              onClick={() => navigate('/login')}
-              endIcon={<ArrowForwardIcon />}
-              sx={{
-                textTransform: 'none',
-                fontWeight: 600,
-                px: { xs: 4, sm: 5 },
-                py: { xs: 1.5, sm: 1.8 },
-                fontSize: { xs: '14px', sm: '16px' },
-                borderRadius: '100px',
-              }}
-            >
-              {t('landing.ctaButton')}
-            </Button>
-          </Box>
-        </Container>
-      </Box>
+      <section style={{ padding: '80px 0', backgroundColor: '#ffffff' }}>
+        <div className="container">
+          <div className="row justify-content-center text-center">
+            <div className="col-lg-9">
+              <div className="card" style={{ border: '1px solid #f1f2f6' }}>
+                <div className="card-body p-40">
+                  <div
+                    className="d-flex align-items-center justify-content-center mx-auto mb-20"
+                    style={{
+                      width: 64,
+                      height: 64,
+                      borderRadius: 12,
+                      backgroundColor: 'rgba(32,201,151,0.12)',
+                      color: '#20c997',
+                    }}
+                  >
+                    <i className="la la-rocket" style={{ fontSize: 26 }}></i>
+                  </div>
+                  <h3
+                    className="color-dark fw-700 mb-15"
+                    style={{
+                      fontSize: 'clamp(24px, 3vw, 40px)',
+                      lineHeight: 1.2,
+                      letterSpacing: '-1px',
+                    }}
+                  >
+                    {t('landing.ctaTitle')}
+                  </h3>
+                  <p
+                    className="text-muted mx-auto mb-30"
+                    style={{ maxWidth: 460, fontSize: 16.5, lineHeight: 1.65 }}
+                  >
+                    {t('landing.ctaDescription')}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-default btn-squared px-50 py-15"
+                    onClick={() => navigate('/login')}
+                  >
+                    {t('landing.ctaButton')} <i className="la la-arrow-right ml-10"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       {/* Footer */}
-      <Box sx={{ backgroundColor: '#FFFFFF', borderTop: '1px solid #E2E8F0', py: 3 }}>
-        <Container maxWidth="lg" sx={{ px: { xs: 2, sm: 3 } }}>
-          <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              <img src="/agt_logo.png" alt="AGT" style={{ height: '20px', opacity: 0.4 }} />
-              <Typography sx={{ color: '#94A3B8', fontSize: { xs: '11px', sm: '12px' } }}>
-                {t('landing.footer')}
-              </Typography>
-            </Box>
-            <Typography sx={{ color: '#CBD5E1', fontSize: '11px' }}>
-              Feito por SCKJ
-            </Typography>
-          </Box>
-        </Container>
-      </Box>
-    </Box>
+      <footer
+        className="footer-wrapper"
+        style={{
+          position: 'relative',
+          left: 'auto',
+          bottom: 'auto',
+          padding: '20px 0',
+          boxShadow: 'none',
+          borderTop: '1px solid #f1f2f6',
+        }}
+      >
+        <div className="container-fluid">
+          <div className="row align-items-center">
+            <div className="col-md-6">
+              <div
+                className="footer-copyright d-flex align-items-center"
+                style={{ paddingLeft: 0, gap: 10 }}
+              >
+                <img
+                  src="/logo.jpeg"
+                  alt="AGT"
+                  style={{ height: 20, width: 'auto', opacity: 0.4 }}
+                />
+                <p className="mb-0" style={{ fontSize: 12.5, color: '#9299b8' }}>
+                  {t('landing.footer')}
+                </p>
+              </div>
+            </div>
+            <div className="col-md-6">
+              <div className="footer-menu text-right">
+                <p className="mb-0" style={{ fontSize: 12, color: '#9299b8' }}>
+                  {t('landing.madeBy')}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
   );
 };
 

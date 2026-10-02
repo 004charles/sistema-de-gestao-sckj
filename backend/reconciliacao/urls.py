@@ -23,6 +23,7 @@ urlpatterns = [
         views.dashboard_auditoria_periodo_view, name='dashboard-auditoria-periodo',
     ),
     path('relatorios/resumo/', views.relatorio_resumo_view, name='relatorio-resumo'),
+    path('documentos/detectar/', views.detectar_documento_view, name='detectar-documento'),
     path('documentos/upload/', views.upload_documento_view, name='upload-documento'),
     path('documentos/listar/', views.listar_documentos_view, name='listar-documentos'),
     path('documentos/<int:documento_id>/', views.deletar_documento_view, name='deletar-documento'),

@@ -12,7 +12,7 @@ import ast
 import logging
 import operator
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from .models import (
     Contabilidade, DeclaracaoAGT, DocumentoUpload, Ocorrencia, Reconciliacao,
@@ -20,6 +20,9 @@ from .models import (
 )
 
 logger = logging.getLogger('reconciliacao')
+
+MAX_DIGITS_VALOR = Decimal('9999999999999999.99')
+MIN_DIGITS_VALOR = Decimal('-9999999999999999.99')
 
 _FUNCOES = {'abs': abs, 'min': min, 'max': max, 'round': round}
 _OPERADORES_BIN = {
@@ -90,11 +93,16 @@ def avaliar(expressao, contexto):
 def avaliar_numerico(expressao, contexto):
     resultado = avaliar(expressao, contexto)
     if isinstance(resultado, bool):
-        return Decimal('1' if resultado else '0')
+        return Decimal('1.00' if resultado else '0.00')
     try:
-        return Decimal(str(resultado))
-    except (InvalidOperation, ValueError):
-        return Decimal('0')
+        val = Decimal(str(resultado)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        if val > MAX_DIGITS_VALOR:
+            return MAX_DIGITS_VALOR
+        if val < MIN_DIGITS_VALOR:
+            return MIN_DIGITS_VALOR
+        return val
+    except (InvalidOperation, ValueError, Exception):
+        return Decimal('0.00')
 
 
 def _serializar(valor):
@@ -212,73 +220,34 @@ def construir_contexto(empresa, ano, mes):
     # Se não temos linhas no banco mas temos Balancete em PDF/documento, tentar ler texto extraído
     doc_balancete = next((d for d in documentos if d.tipo == 'BALANCETE'), None)
     if not linhas.exists() and doc_balancete and doc_balancete.texto_extraido:
-        txt = doc_balancete.texto_extraido
-        import re
-        def _parse_val(pattern):
-            match = re.search(pattern, txt, re.IGNORECASE)
-            if match:
-                val_str = match.group(1).replace(' ', '').replace('.', '').replace(',', '.')
-                try:
-                    return Decimal(val_str)
-                except Exception:
-                    return Decimal('0')
-            return Decimal('0')
-
-        if '4511' in txt or 'CAIXA' in txt:
-            caixa_saldo_credor = _parse_val(r'4511\s+Caixa[^\n\r]+?([\d\s]+[,.]\d{2})\s*$')
-        if '43' in txt or 'BANCO' in txt:
-            bancos_saldo = _parse_val(r'43\s+Dep[óo]sitos[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '343' in txt:
-            irt_contabilizado = _parse_val(r'343\s+Imposto de rendimento[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '3492' in txt:
-            inss_contabilizado = _parse_val(r'3492\s+Seguran[çc]a Social[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '3493' in txt:
-            retencao_prestadores_contab = _parse_val(r'3493\s+Reten[çc][ãa]o na fonte[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '3413' in txt:
-            retencoes_clientes_contab = _parse_val(r'3413\s+Reten[çc][ãa]o na fonte clientes\s+([\d\s]+[,.]\d{2})')
-        if '75234' in txt:
-            honorarios_prestadores = _parse_val(r'75234\s+Honor[áa]rios e aven[çc]as\s+([\d\s]+[,.]\d{2})')
-        if '752' in txt:
-            fornecimentos_terceiros = _parse_val(r'752\s+Fornecimentos e servi[çc]os[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '72' in txt:
-            remuneracoes_total = _parse_val(r'722\s+Remunera[çc][õo]es[^\n\r]+?([\d\s]+[,.]\d{2})')
-            encargos_patronais = _parse_val(r'725\s+Encargos sobre remunera[çc][õo]es\s+([\d\s]+[,.]\d{2})')
-        if '3451' in txt:
-            iva_suportado_contab = _parse_val(r'3451\s+IVA Suportado\s+([\d\s]+[,.]\d{2})')
-        if '75312' in txt or '7531' in txt:
-            iva_custo_contab = _parse_val(r'75312\s+Imposto sobre o valor[^\n\r]+?([\d\s]+[,.]\d{2})')
-        if '62' in txt or '61' in txt:
-            volume_negocios_contab = _parse_val(r'62\s+Presta[çc][õo]es de Servi[çc]o[^\n\r]+?([\d\s]+[,.]\d{2})')
+        from . import pdf_service
+        dados_bal = pdf_service.extrair_dados_balancete(doc_balancete.texto_extraido)
+        volume_negocios_contab = dados_bal['vendas']
+        caixa_saldo_credor = dados_bal['caixa_saldo_credor']
+        irt_contabilizado = dados_bal['irt_retido']
+        inss_contabilizado = dados_bal['inss_retido']
+        retencao_prestadores_contab = dados_bal['retencao_prestadores']
+        retencoes_clientes_contab = dados_bal['retencao_clientes']
+        honorarios_prestadores = dados_bal['honorarios_prestadores']
+        remuneracoes_total = dados_bal['remuneracoes']
+        iva_suportado_contab = dados_bal['iva_suportado']
+        iva_custo_contab = dados_bal['iva_custo']
 
     # Se não temos DeclaracaoAGT no banco mas temos MODELO7 nos documentos
     volume_negocios_declarado = iva_liquidado / Decimal('0.14') if iva_liquidado > 0 else Decimal('0')
     doc_m7 = next((d for d in documentos if d.tipo == 'MODELO7'), None)
     if not declaracao and doc_m7 and doc_m7.texto_extraido:
-        txt_m7 = doc_m7.texto_extraido
-        import re
-        def _parse_m7(pattern):
-            match = re.search(pattern, txt_m7, re.IGNORECASE)
-            if match:
-                val_str = match.group(1).replace(' ', '').replace('.', '').replace(',', '.')
-                try:
-                    return Decimal(val_str)
-                except Exception:
-                    return Decimal('0')
-            return Decimal('0')
-
-        liq = _parse_m7(r'IVA\s*:\s*37\s+([\d\s]+[,.]\d{2})')
-        if not liq:
-            liq = _parse_m7(r'33\s+([\d\s]+[,.]\d{2})')
-        if liq:
-            iva_liquidado = liq
-            iva_apurado = liq
-            iva_pagar = liq
-        ded = _parse_m7(r'32\s+([\d\s]+[,.]\d{2})')
-        if ded:
-            iva_dedutivel = ded
-        base_m7 = _parse_m7(r'SOMAS\s+31\s+([\d\s]+[,.]\d{2})')
-        if base_m7:
-            volume_negocios_declarado = base_m7
+        from . import pdf_service
+        dados_m7 = pdf_service.extrair_dados_modelo7(doc_m7.texto_extraido)
+        if dados_m7['iva_liquidado'] > Decimal('0'):
+            iva_liquidado = dados_m7['iva_liquidado']
+            iva_apurado = dados_m7['iva_liquidado']
+        if dados_m7['iva_dedutivel'] > Decimal('0'):
+            iva_dedutivel = dados_m7['iva_dedutivel']
+        if dados_m7['iva_pagar'] > Decimal('0'):
+            iva_pagar = dados_m7['iva_pagar']
+        if dados_m7['base_tributavel'] > Decimal('0'):
+            volume_negocios_declarado = dados_m7['base_tributavel']
 
     # Presença de documentos específicos
     tem_doc_folha = 1 if any(d.tipo == 'FOLHA_SALARIAL' for d in documentos) else 0
@@ -419,8 +388,15 @@ def executar(empresa, ano, mes):
     actualizadas = 0
     avaliadas = 0
     erros = []
+    REGRAS_IGNORAR_FALTA_DOC = {
+        'BANCO-001', 'FAC-001', 'FAC-002', 'HIST-001', 'HIST-002',
+        'II-001', 'IRT-002', 'IRT-003', 'PRAZO-002', 'REL-001',
+        'REL-002', 'RET-002', 'SEL-001', 'SS-001', 'IVA-005'
+    }
 
     for regra in regras:
+        if regra.codigo in REGRAS_IGNORAR_FALTA_DOC:
+            continue
         base = regra.base_legal
         if not _vigencia_cobre(base, ano, mes):
             continue

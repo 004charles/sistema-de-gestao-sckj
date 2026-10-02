@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
 from rest_framework.response import Response
@@ -26,6 +27,9 @@ from . import pdf_service
 from . import extracao_service
 from . import classificador_service
 from . import cobertura_service
+from . import validacao_documental
+from . import dossie_service
+from . import regra_engine
 
 logger = logging.getLogger('reconciliacao')
 
@@ -46,7 +50,11 @@ def empresas_acessiveis(user):
 
 
 def verificar_permissao(user, codename):
-    return user.is_superuser or user.has_perm(f'reconciliacao.{codename}')
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_superuser:
+        return True
+    return user.has_perm(f'reconciliacao.{codename}')
 
 
 def documentos_acessiveis(user):
@@ -190,68 +198,10 @@ class ReconciliacaoViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def _executar_reconciliacao(self, empresa_id, ano, mes):
-        try:
-            empresa = Empresa.objects.get(pk=empresa_id)
-        except Empresa.DoesNotExist:
-            return {'error': 'Empresa não encontrada'}
-
-        dados_contab = Contabilidade.objects.filter(
-            empresa_id=empresa_id, ano=ano, mes=mes
-        )
-        dados_agt = DeclaracaoAGT.objects.filter(
-            empresa_id=empresa_id, ano=ano, mes=mes
-        ).first()
-
-        if not dados_agt:
-            return {'error': f'Declaração AGT não encontrada para {mes}/{ano}'}
-
-        contab_normalizado = self._normalizar_contabilidade(dados_contab)
-
-        reconciliacao = Reconciliacao.objects.create(
-            empresa_id=empresa_id,
-            ano=ano,
-            mes=mes,
-            status='PENDENTE'
-        )
-
-        campos_comparacao = [
-            {'campo': 'IVA Liquidado', 'contab': 'iva_liquidado', 'agt': 'iva_liquidado'},
-            {'campo': 'IVA Dedutível', 'contab': 'iva_dedutivel', 'agt': 'iva_dedutivel'},
-            {'campo': 'IVA Apuramento', 'contab': 'iva_apuramento', 'agt': 'iva_apurado'},
-            {'campo': 'IVA a Pagar', 'contab': 'iva_pagar', 'agt': 'iva_pagar'},
-            {'campo': 'IVA a Recuperar', 'contab': 'iva_recuperar', 'agt': 'iva_recuperar'},
-        ]
-
-        total_ok = 0
-        total_divergencia = 0
-
-        for item in campos_comparacao:
-            valor_contab = float(contab_normalizado.get(item['contab'], 0))
-            valor_agt = float(getattr(dados_agt, item['agt'], 0))
-            diferenca = valor_contab - valor_agt
-            status_campo = 'OK' if abs(diferenca) < 0.01 else 'DIVERGENCIA'
-
-            if status_campo == 'OK':
-                total_ok += 1
-            else:
-                total_divergencia += 1
-
-            ReconciliacaoDetalhe.objects.create(
-                reconciliacao=reconciliacao,
-                campo=item['campo'],
-                descricao=f"Comparação {item['campo']}",
-                valor_contabilidade=valor_contab,
-                valor_agt=valor_agt,
-                diferenca=diferenca,
-                status=status_campo,
-                nivel=2
-            )
-
-        reconciliacao.total_campos_ok = total_ok
-        reconciliacao.total_campos_divergencia = total_divergencia
-        reconciliacao.status = 'CONCILIADO' if total_divergencia == 0 else 'DIVERGENCIA'
-        reconciliacao.save()
-
+        res = dossie_service.executar_reconciliacao_automatica(empresa_id, ano, mes)
+        if not res:
+            return {'error': f'Dados insuficientes para reconciliação em {mes}/{ano}'}
+        reconciliacao = Reconciliacao.objects.get(pk=res['id'])
         return ReconciliacaoSerializer(reconciliacao).data
 
     def _normalizar_contabilidade(self, dados):
@@ -340,6 +290,41 @@ def relatorio_resumo_view(request):
     return Response(dados)
 
 
+TIPOS_UNICOS_POR_PERIODO = ('BALANCETE', 'MODELO7', 'IMPOSTO_INDUSTRIAL', 'DECLARACAO_IRT')
+
+
+def _documento_duplicado(empresa, ano, mes, tipo, nome_arquivo=None, excluir_pk=None):
+    """Documento do mesmo tipo no mesmo período que bloqueia novo upload.
+
+    Documentos ilegíveis ou com erro não bloqueiam: permitem tentar de novo.
+    Para declarações periódicas e balancetes (BALANCETE, MODELO7, etc.), admite apenas 1 por período.
+    Para documentos de suporte e arquivo (faturas, comprovativos, folhas, etc.), permite múltiplos,
+    barrando apenas se já existir ficheiro com o mesmo nome no mesmo período.
+    """
+    qs = DocumentoUpload.objects.filter(
+        empresa=empresa, ano=ano, mes=mes, tipo=tipo,
+    ).exclude(estado__in=('ERRO', 'ILEGIVEL'))
+    if excluir_pk:
+        qs = qs.exclude(pk=excluir_pk)
+    if tipo in TIPOS_UNICOS_POR_PERIODO:
+        return qs.order_by('-id').first()
+    if nome_arquivo:
+        return qs.filter(nome_arquivo=nome_arquivo).order_by('-id').first()
+    return None
+
+
+def _resposta_duplicado(duplicado, tipo, ano, mes):
+    return Response(
+        {
+            'error': (
+                f'Já existe um documento do tipo {tipo} para {mes:02d}/{ano} '
+                f'("{duplicado.nome_arquivo}"). Elimine-o antes de subir outro.'
+            )
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 @api_view(['POST'])
 def upload_documento_view(request):
     if not verificar_permissao(request.user, 'add_documentoupload'):
@@ -349,9 +334,10 @@ def upload_documento_view(request):
         )
     arquivo = request.FILES.get('arquivo')
     tipo = (request.data.get('tipo') or '').strip()
-    empresa_id = request.data.get('empresa_id')
+    empresa_id = request.data.get('empresa_id') or request.data.get('empresa')
     ano = _inteiro_opcional(request.data.get('ano'))
     mes = _inteiro_opcional(request.data.get('mes'))
+    substituir = str(request.data.get('substituir', '')).lower() in ('1', 'true', 'yes', 'on')
 
     if not arquivo:
         return Response(
@@ -385,6 +371,15 @@ def upload_documento_view(request):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    if tipo:
+        nome_doc = request.data.get('nome') or arquivo.name
+        duplicado = _documento_duplicado(empresa, ano, mes, tipo, nome_arquivo=nome_doc)
+        if duplicado is not None:
+            if substituir:
+                duplicado.delete()
+            else:
+                return _resposta_duplicado(duplicado, tipo, ano, mes)
+
     extensao = ('.' + arquivo.name.rsplit('.', 1)[-1].lower()
                 if '.' in arquivo.name else '')
     if extensao not in extracao_service.EXTENSOES_ACEITAS:
@@ -411,6 +406,18 @@ def upload_documento_view(request):
     documento.tipo_sugerido = sugestao['tipo']
     if not tipo:
         documento.tipo = sugestao['tipo']
+        duplicado = _documento_duplicado(
+            empresa, ano, mes, documento.tipo, nome_arquivo=documento.nome_arquivo, excluir_pk=documento.pk
+        )
+        if duplicado is not None:
+            if substituir:
+                duplicado.delete()
+            else:
+                tipo_efetivo = documento.tipo
+                arquivo_salvo = documento.arquivo
+                documento.delete()
+                arquivo_salvo.delete(save=False)
+                return _resposta_duplicado(duplicado, tipo_efetivo, ano, mes)
 
     if resultado['erro'] or (texto or '').startswith('Erro ao extrair texto'):
         documento.estado = 'ERRO'
@@ -418,8 +425,95 @@ def upload_documento_view(request):
         documento.estado = 'ILEGIVEL'
     else:
         documento.estado = 'VALIDADO'
+
+    # Processamento especial de Dossiê Mensal Completo (Envelope Fiscal multi-documentos)
+    is_dossie = (tipo == 'DOSSIE_MENSAL') or (
+        extensao == '.pdf' and dossie_service.is_dossie_mensal(documento.arquivo.path)
+    )
+    if is_dossie and documento.estado == 'VALIDADO':
+        documento.tipo = 'DOSSIE_MENSAL'
+        documento.tipo_sugerido = 'DOSSIE_MENSAL'
+        documento.texto_extraido = texto
+        documento.save()
+        res_dossie = dossie_service.desmembrar_e_processar_dossie(
+            documento.arquivo.path, empresa, ano, mes
+        )
+        return Response({
+            'success': True,
+            'is_dossie': True,
+            'mensagem': res_dossie['mensagem'],
+            'ano': res_dossie.get('ano') or documento.ano,
+            'mes': res_dossie.get('mes') or documento.mes,
+            'empresa_id': empresa.id,
+            'documento': {
+                'id': documento.id,
+                'tipo': 'DOSSIE_MENSAL',
+                'tipo_sugerido': 'DOSSIE_MENSAL',
+                'classificado_automaticamente': not bool(tipo),
+                'formato': resultado['formato'],
+                'estado': 'VALIDADO',
+                'empresa': empresa.id,
+                'empresa_nome': empresa.nome,
+                'ano': res_dossie.get('ano') or documento.ano,
+                'mes': res_dossie.get('mes') or documento.mes,
+                'nome_arquivo': documento.nome_arquivo,
+            },
+            'documentos_criados': res_dossie['documentos_criados'],
+            'auditoria': res_dossie.get('auditoria'),
+            'reconciliacao': res_dossie.get('reconciliacao'),
+            'analise_ia_id': res_dossie.get('analise_ia_id'),
+        })
+
+    # Validação estrita de conteúdo para BALANCETE e MODELO7 em documentos validados
+    if documento.estado == 'VALIDADO' and documento.tipo in ('BALANCETE', 'MODELO7'):
+        valido, motivo_erro = validacao_documental.validar_documento_para_tipo(
+            documento.tipo, texto, documento.nome_arquivo
+        )
+        if not valido:
+            arquivo_salvo = documento.arquivo
+            documento.delete()
+            arquivo_salvo.delete(save=False)
+            logger.warning(f"Upload rejeitado por validação estrita ({documento.tipo}): {motivo_erro}")
+            return Response(
+                {'error': motivo_erro},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
     documento.texto_extraido = texto
     documento.save()
+
+    # Automação de Ponta a Ponta: Se o documento for validado e contiver ano e mês,
+    # sincroniza Contabilidade/Declarações, executa o motor de 15 regras fiscais,
+    # reconcilia e processa IA se ambos os documentos já estiverem disponíveis.
+    auditoria_auto = None
+    reconciliacao_auto = None
+    analise_ia_id = None
+    if documento.estado == 'VALIDADO' and documento.ano and documento.mes:
+        try:
+            doc_b = documento if documento.tipo == 'BALANCETE' else DocumentoUpload.objects.filter(
+                empresa=empresa, ano=documento.ano, mes=documento.mes, tipo='BALANCETE'
+            ).order_by('-id').first()
+            doc_m = documento if documento.tipo in ('MODELO7', 'COMPROVATIVOS') else DocumentoUpload.objects.filter(
+                empresa=empresa, ano=documento.ano, tipo__in=['MODELO7', 'COMPROVATIVOS']
+            ).order_by('-id').first()
+
+            _sincronizar_dados_documentos(empresa, documento.ano, documento.mes, doc_b, doc_m)
+            auditoria_auto = regra_engine.executar(empresa, documento.ano, documento.mes)
+            reconciliacao_auto = dossie_service.executar_reconciliacao_automatica(empresa, documento.ano, documento.mes)
+
+            if doc_b and doc_m and doc_b.texto_extraido and doc_m.texto_extraido:
+                if not AnaliseIA.objects.filter(documento_contabilidade=doc_b, documento_agt=doc_m, status='CONCLUIDA').exclude(resultado='').exists():
+                    res_ia = pdf_service.analisar_documentos(doc_b.texto_extraido, doc_m.texto_extraido, 'pt')
+                    if res_ia.get('success'):
+                        analise_ia_obj = AnaliseIA.objects.create(
+                            documento_contabilidade=doc_b,
+                            documento_agt=doc_m,
+                            resultado=res_ia.get('analise'),
+                            status='CONCLUIDA'
+                        )
+                        analise_ia_id = analise_ia_obj.id
+        except Exception as e:
+            logger.warning(f"Erro no auto-processamento de auditoria pós-upload: {e}")
 
     return Response({
         'success': True,
@@ -436,8 +530,136 @@ def upload_documento_view(request):
             'mes': documento.mes,
             'nome_arquivo': documento.nome_arquivo,
             'texto_preview': texto[:500] + '...' if len(texto) > 500 else texto,
-        }
+        },
+        'auditoria': auditoria_auto,
+        'reconciliacao': reconciliacao_auto,
+        'analise_ia_id': analise_ia_id,
     })
+
+
+@api_view(['POST'])
+def detectar_documento_view(request):
+    """Inspeciona o documento antes do upload final para identificar automaticamente:
+    - Empresa (através do NIF ou Razão Social no texto)
+    - Período (Ano e Mês)
+    - Tipo de documento (Dossiê Completo, Balancete, Modelo 7, etc.)
+    """
+    arquivo = request.FILES.get('arquivo')
+    if not arquivo:
+        return Response({'error': 'Ficheiro não fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+    import tempfile
+    import os
+    import unicodedata
+    extensao = ('.' + arquivo.name.rsplit('.', 1)[-1].lower() if '.' in arquivo.name else '')
+    
+    with tempfile.NamedTemporaryFile(suffix=extensao, delete=False) as tmp:
+        for chunk in arquivo.chunks():
+            tmp.write(chunk)
+        tmp_path = tmp.name
+
+    try:
+        resultado = extracao_service.extrair_conteudo(tmp_path, arquivo.name)
+        texto = resultado.get('texto') or ''
+
+        is_dossie = False
+        if extensao == '.pdf':
+            is_dossie = dossie_service.is_dossie_mensal(tmp_path)
+
+        if is_dossie:
+            tipo = 'DOSSIE_MENSAL'
+            tipo_nome = 'Dossiê Mensal Completo (Envelope Fiscal Único)'
+        else:
+            sugestao = classificador_service.classificar(arquivo.name, texto)
+            tipo = sugestao['tipo']
+            tipo_nome = dict(DocumentoUpload.TIPO_CHOICES).get(tipo, tipo)
+
+        # Detectar Empresa
+        empresas = empresas_acessiveis(request.user)
+        empresa_detetada = None
+        texto_norm = unicodedata.normalize('NFKD', texto).lower()
+
+        for emp in empresas:
+            if emp.nif and emp.nif in texto:
+                empresa_detetada = emp
+                break
+
+        if not empresa_detetada:
+            for emp in empresas:
+                nome_simplificado = ''.join(c for c in unicodedata.normalize('NFKD', emp.nome) if c.isalnum() or c.isspace()).lower()
+                partes = [p for p in nome_simplificado.split() if len(p) > 3][:3]
+                if partes and all(p in texto_norm for p in partes):
+                    empresa_detetada = emp
+                    break
+
+        ano, mes, _ = dossie_service.detectar_periodo_e_nif(texto)
+
+        return Response({
+            'success': True,
+            'arquivo_nome': arquivo.name,
+            'is_dossie': is_dossie,
+            'tipo': tipo,
+            'tipo_nome': tipo_nome,
+            'empresa_id': empresa_detetada.id if empresa_detetada else None,
+            'empresa_nome': empresa_detetada.nome if empresa_detetada else None,
+            'empresa_nif': empresa_detetada.nif if empresa_detetada else None,
+            'ano': ano,
+            'mes': mes,
+        })
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _sincronizar_dados_documentos(empresa, ano, mes, doc_balancete=None, doc_agt=None):
+    """Sincroniza automaticamente Contabilidade e DeclaracaoAGT com os ficheiros PDF carregados."""
+    try:
+        if doc_balancete and doc_balancete.texto_extraido and not Contabilidade.objects.filter(empresa=empresa, ano=ano, mes=mes).exists():
+            b_dados = pdf_service.extrair_dados_balancete(doc_balancete.texto_extraido)
+            contas = [
+                ('6211', 'Prestações de Serviço - Mercado Nacional', Decimal('0'), b_dados['vendas'], -b_dados['vendas']),
+                ('4511', 'Caixa Kwanza', Decimal('0'), b_dados['caixa_saldo_credor'], -b_dados['caixa_saldo_credor']),
+                ('3453', 'IVA Liquidado - Operações Gerais', b_dados['iva_liquidado'], b_dados['iva_liquidado'], Decimal('0')),
+                ('3451', 'IVA Suportado / Dedutível', b_dados['iva_suportado'], b_dados['iva_suportado'], Decimal('0')),
+                ('3456', 'IVA a Pagar de Apuramento', Decimal('0'), b_dados['iva_pagar'], -b_dados['iva_pagar']),
+                ('3431', 'Imposto de Rendimento do Trabalho (IRT)', Decimal('0'), b_dados['irt_retido'], -b_dados['irt_retido']),
+                ('3492', 'Segurança Social (INSS)', Decimal('0'), b_dados['inss_retido'], -b_dados['inss_retido']),
+                ('3493', 'Retenção na Fonte Prestadores (6,5%)', Decimal('0'), b_dados['retencao_prestadores'], -b_dados['retencao_prestadores']),
+                ('3413', 'Retenção na Fonte Clientes', b_dados['retencao_clientes'], Decimal('0'), b_dados['retencao_clientes']),
+                ('75234', 'Honorários e Avenças (Prestadores)', b_dados['honorarios_prestadores'], Decimal('0'), b_dados['honorarios_prestadores']),
+                ('722', 'Remunerações - Pessoal', b_dados['remuneracoes'], Decimal('0'), b_dados['remuneracoes']),
+                ('75312', 'IVA Lançado em Custos', b_dados['iva_custo'], Decimal('0'), b_dados['iva_custo']),
+            ]
+            for cod, desc, deb, cred, sal in contas:
+                if deb > 0 or cred > 0:
+                    Contabilidade.objects.create(
+                        empresa=empresa,
+                        ano=ano,
+                        mes=mes,
+                        conta_codigo=cod,
+                        conta_descricao=desc,
+                        valor_debito=deb,
+                        valor_credito=cred,
+                        saldo=sal,
+                    )
+        if doc_agt and doc_agt.texto_extraido and not DeclaracaoAGT.objects.filter(empresa=empresa, ano=ano, mes=mes).exists():
+            m_dados = pdf_service.extrair_dados_modelo7(doc_agt.texto_extraido)
+            if m_dados['base_tributavel'] > 0 or m_dados['iva_liquidado'] > 0 or m_dados['iva_pagar'] > 0:
+                DeclaracaoAGT.objects.create(
+                    empresa=empresa,
+                    ano=ano,
+                    mes=mes,
+                    nif=empresa.nif,
+                    razao_social=empresa.nome,
+                    regime_iva=empresa.regime_iva or 'Regime Geral',
+                    iva_liquidado=m_dados['iva_liquidado'],
+                    iva_dedutivel=m_dados['iva_dedutivel'],
+                    iva_apurado=m_dados['iva_liquidado'] - m_dados['iva_dedutivel'],
+                    iva_pagar=m_dados['iva_pagar'],
+                    iva_recuperar=m_dados['iva_recuperar'],
+                )
+    except Exception as e:
+        logger.warning(f"Erro na sincronização de documentos para contabilidade/agt: {e}")
 
 
 @api_view(['POST'])
@@ -464,20 +686,56 @@ def analisar_documentos_view(request):
 
     try:
         docs_usuario = documentos_acessiveis(request.user)
-        doc_contab = docs_usuario.filter(pk=doc_contab_id, tipo='BALANCETE').first()
-        doc_agt = docs_usuario.filter(pk=doc_agt_id, tipo='MODELO7').first()
+        doc_contab = docs_usuario.filter(pk=doc_contab_id).first()
+        doc_agt = docs_usuario.filter(pk=doc_agt_id).first()
         if doc_contab is None or doc_agt is None:
             raise DocumentoUpload.DoesNotExist
         logger.info(f"Documentos encontrados: contab={doc_contab.nome_arquivo}, agt={doc_agt.nome_arquivo}")
     except DocumentoUpload.DoesNotExist:
         logger.error(f"Documento não encontrado: contab_id={doc_contab_id}, agt_id={doc_agt_id}")
         return Response(
-            {'error': 'Documentos não encontrados ou sem acesso (esperado: Balancete + Modelo 7).'},
+            {'error': 'Documentos não encontrados ou sem acesso.'},
             status=status.HTTP_404_NOT_FOUND
         )
 
+    # Re-extrair texto se vazio
+    if not (doc_contab.texto_extraido or '').strip() and doc_contab.arquivo:
+        try:
+            res_c = extracao_service.extrair_conteudo(doc_contab.arquivo.path, doc_contab.nome_arquivo)
+            if res_c.get('texto'):
+                doc_contab.texto_extraido = res_c['texto']
+                doc_contab.save(update_fields=['texto_extraido'])
+        except Exception as e:
+            logger.warning(f"Erro ao extrair contab: {e}")
+
+    if not (doc_agt.texto_extraido or '').strip() and doc_agt.arquivo:
+        try:
+            res_a = extracao_service.extrair_conteudo(doc_agt.arquivo.path, doc_agt.nome_arquivo)
+            if res_a.get('texto'):
+                doc_agt.texto_extraido = res_a['texto']
+                doc_agt.save(update_fields=['texto_extraido'])
+        except Exception as e:
+            logger.warning(f"Erro ao extrair agt: {e}")
+
     logger.info(f"Texto extraído contabilidade: {len(doc_contab.texto_extraido or '')} chars")
     logger.info(f"Texto extraído AGT: {len(doc_agt.texto_extraido or '')} chars")
+
+    # Validação estrita antes de acionar a Inteligência Artificial
+    val_c, err_c = validacao_documental.validar_balancete(doc_contab.texto_extraido, doc_contab.nome_arquivo)
+    if not val_c:
+        logger.warning(f"Análise rejeitada: Balancete inválido ({err_c})")
+        return Response(
+            {'error': f"Documento de contabilidade inválido: {err_c}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    val_a, err_a = validacao_documental.validar_modelo7(doc_agt.texto_extraido, doc_agt.nome_arquivo)
+    if not val_a:
+        logger.warning(f"Análise rejeitada: Modelo 7 inválido ({err_a})")
+        return Response(
+            {'error': f"Documento da AGT inválido: {err_a}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     analise = AnaliseIA.objects.create(
         documento_contabilidade=doc_contab,
@@ -502,6 +760,12 @@ def analisar_documentos_view(request):
         DocumentoUpload.objects.filter(
             pk__in=[doc_contab.pk, doc_agt.pk]
         ).update(estado='UTILIZADO')
+        # Sincronizar dados estruturados com tabelas contabilidade e agt
+        emp = doc_contab.empresa or doc_agt.empresa
+        ano_doc = doc_contab.ano or doc_agt.ano
+        mes_doc = doc_contab.mes or doc_agt.mes
+        if emp and ano_doc and mes_doc:
+            _sincronizar_dados_documentos(emp, ano_doc, mes_doc, doc_contab, doc_agt)
         logger.info("Análise concluída com sucesso")
         return Response({
             'success': True,
@@ -613,8 +877,23 @@ def deletar_documento_view(request, documento_id):
     documento = documentos_acessiveis(request.user).filter(pk=documento_id).first()
     if documento is None:
         return Response({'error': 'Documento não encontrado'}, status=status.HTTP_404_NOT_FOUND)
+    empresa_id, ano, mes = documento.empresa_id, documento.ano, documento.mes
     documento.delete()
-    return Response({'success': True})
+
+    # Sem documentos no período não podem sobrar resultados de análise.
+    limpos = {'ocorrencias': 0, 'reconciliacoes': 0}
+    if ano is not None and mes is not None:
+        restam = DocumentoUpload.objects.filter(
+            empresa_id=empresa_id, ano=ano, mes=mes
+        ).exists()
+        if not restam:
+            limpos['ocorrencias'], _ = Ocorrencia.objects.filter(
+                empresa_id=empresa_id, ano=ano, mes=mes
+            ).delete()
+            limpos['reconciliacoes'], _ = Reconciliacao.objects.filter(
+                empresa_id=empresa_id, ano=ano, mes=mes
+            ).delete()
+    return Response({'success': True, 'resultados_limpos': limpos})
 
 
 @api_view(['GET'])
@@ -733,17 +1012,56 @@ def dashboard_auditoria_periodo_view(request, empresa_id, ano, mes):
             m_copy['status_semaforo'] = 'CONFORME'       # 🟢
         motores_status.append(m_copy)
 
-    # 4. Indicadores contábeis e fiscais do período
-    from . import regra_engine
-    contexto, _ = regra_engine.construir_contexto(empresa, ano, mes)
-
-    # 5. Dois documentos mestres do período (Contabilidade e Portal AGT)
+    # 4. Dois documentos mestres do período (Contabilidade e Portal AGT)
     doc_balancete = DocumentoUpload.objects.filter(
         empresa=empresa, ano=ano, mes=mes, tipo='BALANCETE'
     ).order_by('-id').first()
+    if not doc_balancete:
+        doc_balancete = DocumentoUpload.objects.filter(
+            empresa=empresa, ano=ano, mes=mes, tipo='DOSSIE_MENSAL'
+        ).order_by('-id').first()
+
+    # Procurar AnaliseIA existente para a contabilidade deste período
+    analise_ia_obj = None
+    if doc_balancete:
+        analise_ia_obj = AnaliseIA.objects.filter(
+            documento_contabilidade=doc_balancete,
+            status='CONCLUIDA'
+        ).exclude(resultado='').order_by('-id').first()
+
     doc_agt = DocumentoUpload.objects.filter(
         empresa=empresa, ano=ano, mes=mes, tipo__in=['MODELO7', 'COMPROVATIVOS']
     ).order_by('-id').first()
+
+    # Se não houver Modelo 7 no mês exato mas há AnaliseIA, resolve o doc_agt a partir da análise
+    if not doc_agt and analise_ia_obj:
+        doc_agt = analise_ia_obj.documento_agt
+
+    # Se ainda não houver, procura Modelo 7 mais recente da empresa no mesmo ano (ex: Junho anexado em Julho)
+    if not doc_agt:
+        doc_agt = DocumentoUpload.objects.filter(
+            empresa=empresa, ano=ano, tipo__in=['MODELO7', 'COMPROVATIVOS']
+        ).order_by('-mes', '-id').first()
+
+    # Se ainda não houver, procura Dossiê Mensal do período
+    if not doc_agt:
+        doc_agt = DocumentoUpload.objects.filter(
+            empresa=empresa, ano=ano, mes=mes, tipo='DOSSIE_MENSAL'
+        ).order_by('-id').first()
+
+    if not analise_ia_obj and doc_balancete and doc_agt:
+        analise_ia_obj = AnaliseIA.objects.filter(
+            documento_contabilidade=doc_balancete,
+            documento_agt=doc_agt,
+            status='CONCLUIDA'
+        ).exclude(resultado='').order_by('-id').first()
+
+    # Sincronizar dados estruturados se ainda não gravados
+    _sincronizar_dados_documentos(empresa, ano, mes, doc_balancete, doc_agt)
+
+    # 5. Indicadores contábeis e fiscais do período
+    from . import regra_engine
+    contexto, _ = regra_engine.construir_contexto(empresa, ano, mes)
 
     documentos_base = {
         'balancete': {
@@ -769,6 +1087,7 @@ def dashboard_auditoria_periodo_view(request, empresa_id, ano, mes):
         'mes': mes,
         'cobertura': cobertura,
         'documentos_base': documentos_base,
+        'analise_ia': analise_ia_obj.resultado if analise_ia_obj else None,
         'alertas_resumo': alertas_resumo,
         'motores': motores_status,
         'ocorrencias': [_serializar_ocorrencia(o, completo=True) for o in ocorrencias_qs],

@@ -1,3 +1,4 @@
+from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -248,6 +249,7 @@ class DocumentoUpload(models.Model):
         ('IMPOSTO_INDUSTRIAL', 'Imposto Industrial'),
         ('DECLARACAO_IRT', 'Declaração de IRT'),
         ('FOLHA_SS', 'Folha Segurança Social'),
+        ('DOSSIE_MENSAL', 'Dossiê Mensal Completo'),
         ('OUTRO', 'Outro'),
     ]
     ESTADO_CHOICES = [
@@ -521,6 +523,21 @@ class Ocorrencia(models.Model):
         unique_together = ('empresa', 'ano', 'mes', 'regra')
 
     def clean(self):
+        if self.valor_envolvido is not None:
+            try:
+                val = Decimal(str(self.valor_envolvido)).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                )
+                max_val = Decimal('9999999999999999.99')
+                min_val = Decimal('-9999999999999999.99')
+                if val > max_val:
+                    val = max_val
+                elif val < min_val:
+                    val = min_val
+                self.valor_envolvido = val
+            except Exception:
+                self.valor_envolvido = Decimal('0.00')
+
         if not isinstance(self.evidencia, dict):
             raise ValidationError({'evidencia': 'Evidência deve ser um objecto.'})
         faltantes = [
@@ -533,6 +550,20 @@ class Ocorrencia(models.Model):
             )
 
     def save(self, *args, **kwargs):
+        if self.valor_envolvido is not None:
+            try:
+                val = Decimal(str(self.valor_envolvido)).quantize(
+                    Decimal('0.01'), rounding=ROUND_HALF_UP
+                )
+                max_val = Decimal('9999999999999999.99')
+                min_val = Decimal('-9999999999999999.99')
+                if val > max_val:
+                    val = max_val
+                elif val < min_val:
+                    val = min_val
+                self.valor_envolvido = val
+            except Exception:
+                self.valor_envolvido = Decimal('0.00')
         self.full_clean()
         return super().save(*args, **kwargs)
 

@@ -257,14 +257,21 @@ PDF_FALSO = b'%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n
 
 
 def documento_upload(empresa, tipo='BALANCETE', **kwargs):
+    texto_padrao = (
+        'Balancete Geral de Verificação\nConta Descrição Mov. Débito Mov. Crédito Saldo Débito Saldo Crédito\n31 Clientes 1000,00 1000,00 0,00 0,00\n34 Estado 140,00 140,00 0,00 0,00'
+        if tipo == 'BALANCETE' else
+        'Comprovativo de Entrega de Declaração Modelo 7 de IVA\nRegime Geral Repartição Fiscal Catete\nApuramento do Imposto Quadro 09 Base Tributável 1000,00 Imposto a favor do Estado 140,00'
+        if tipo == 'MODELO7' else
+        'texto de teste'
+    )
     dados = {
         'empresa': empresa,
         'ano': 2026,
         'mes': 7,
         'tipo': tipo,
         'estado': 'VALIDADO',
-        'nome_arquivo': 'teste.pdf',
-        'texto_extraido': 'texto de teste',
+        'nome_arquivo': 'balancete_teste.pdf' if tipo == 'BALANCETE' else 'modelo7_teste.pdf' if tipo == 'MODELO7' else 'teste.pdf',
+        'texto_extraido': texto_padrao,
     }
     dados.update(kwargs)
     doc = DocumentoUpload(**dados)
@@ -295,7 +302,7 @@ class DocumentoUploadAPITests(TestCase):
 
     def upload(self, **extras):
         dados = {
-            'arquivo': SimpleUploadedFile('teste.pdf', PDF_FALSO),
+            'arquivo': SimpleUploadedFile('balancete.pdf', PDF_FALSO),
             'tipo': 'BALANCETE',
             'empresa_id': self.emp_a.pk,
             'ano': 2026,
@@ -308,39 +315,39 @@ class DocumentoUploadAPITests(TestCase):
                 dados[chave] = valor
         return self.client.post('/api/documentos/upload/', dados, format='multipart')
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='Balancete Julho 2026')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete Julho 2026')
     def test_upload_sem_empresa_rejeitado(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload(empresa_id=None)
         self.assertEqual(resp.status_code, 400)
         self.assertIn('empresa_id', str(resp.data))
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='texto')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='texto')
     def test_upload_sem_periodo_rejeitado(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload(ano=None, mes=None)
         self.assertEqual(resp.status_code, 400)
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='texto')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='texto')
     def test_upload_periodo_invalido_rejeitado(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload(ano=1800, mes=13)
         self.assertEqual(resp.status_code, 400)
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='texto')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='texto')
     def test_upload_tipo_desconhecido_rejeitado(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload(tipo='QUALQUER')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('tipo', str(resp.data))
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='texto')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='texto')
     def test_upload_sem_permissao_devolve_403(self, _mock):
         self.autenticar(self.carlos)
         resp = self.upload()
         self.assertEqual(resp.status_code, 403)
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='texto')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='texto')
     def test_upload_empresa_inacessivel_devolve_404(self, _mock):
         from django.contrib.auth.models import Permission
         perm = Permission.objects.get(codename='add_documentoupload')
@@ -349,7 +356,7 @@ class DocumentoUploadAPITests(TestCase):
         resp = self.upload(empresa_id=self.emp_b.pk)
         self.assertEqual(resp.status_code, 404)
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='Balancete Julho')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete Julho')
     def test_upload_valido_cria_documento_validado(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload(nome='balancete-jul.pdf')
@@ -362,7 +369,7 @@ class DocumentoUploadAPITests(TestCase):
         self.assertEqual(doc.mes, 7)
         self.assertEqual(doc.tipo, 'BALANCETE')
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf', return_value='   ')
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='   ')
     def test_upload_sem_texto_fica_ilegivel(self, _mock):
         self.autenticar(self.superuser)
         resp = self.upload()
@@ -370,7 +377,7 @@ class DocumentoUploadAPITests(TestCase):
         doc = DocumentoUpload.objects.get(pk=resp.data['documento']['id'])
         self.assertEqual(doc.estado, 'ILEGIVEL')
 
-    @patch('reconciliacao.views.pdf_service.extrair_texto_pdf',
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf',
            return_value='Erro ao extrair texto: ficheiro corrompido')
     def test_upload_erro_extraccao_fica_erro(self, _mock):
         self.autenticar(self.superuser)
@@ -378,6 +385,37 @@ class DocumentoUploadAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         doc = DocumentoUpload.objects.get(pk=resp.data['documento']['id'])
         self.assertEqual(doc.estado, 'ERRO')
+
+    def test_upload_ficheiro_alheio_como_balancete_rejeitado_400(self):
+        self.autenticar(self.superuser)
+        csv_bilheteira = b'Evento | Organizador | Data | Bilhetes | Receita bruta | Comissao\nShow | Org | 2026-09-01 | 10 | 5000 | 500'
+        f = SimpleUploadedFile('acertos-eventos.csv', csv_bilheteira, content_type='text/csv')
+        resp = self.client.post('/api/documentos/upload/', {
+            'arquivo': f,
+            'empresa_id': self.emp_a.pk,
+            'ano': 2026,
+            'mes': 7,
+            'tipo': 'BALANCETE',
+        }, format='multipart')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('não é um Balancete', resp.data['error'])
+        self.assertFalse(DocumentoUpload.objects.filter(nome_arquivo='acertos-eventos.csv').exists())
+
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf',
+           return_value='Edukangola | Encontre a formação certa bilhete 1 entrada valida 12 de dezembro')
+    def test_upload_ficheiro_alheio_como_modelo7_rejeitado_400(self, _mock):
+        self.autenticar(self.superuser)
+        f = SimpleUploadedFile('edukangola.pdf', PDF_FALSO, content_type='application/pdf')
+        resp = self.client.post('/api/documentos/upload/', {
+            'arquivo': f,
+            'empresa_id': self.emp_a.pk,
+            'ano': 2026,
+            'mes': 7,
+            'tipo': 'MODELO7',
+        }, format='multipart')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('não é uma Declaração Modelo 7', resp.data['error'])
+        self.assertFalse(DocumentoUpload.objects.filter(nome_arquivo='edukangola.pdf').exists())
 
 
 @override_settings(MEDIA_ROOT=MEDIA_TESTE)
@@ -1348,3 +1386,216 @@ class RegraAPITests(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 400)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TESTE)
+class UploadDuplicadoTests(TestCase):
+    """Nenhum documento do mesmo tipo pode ser subido 2x no mesmo ano/mês."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.emp_a = empresa_valida(nome='Empresa A', nif='5000000010')
+        self.emp_a.save()
+        self.superuser = User.objects.create_superuser('root', 'root@x.com', 'pw')
+
+    def autenticar(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def upload(self, **extras):
+        dados = {
+            'arquivo': SimpleUploadedFile('balancete.pdf', PDF_FALSO),
+            'tipo': 'BALANCETE',
+            'empresa_id': self.emp_a.pk,
+            'ano': 2026,
+            'mes': 7,
+        }
+        for chave, valor in extras.items():
+            if valor is None:
+                dados.pop(chave, None)
+            else:
+                dados[chave] = valor
+        return self.client.post('/api/documentos/upload/', dados, format='multipart')
+
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete Julho')
+    def test_tipo_repetido_no_mesmo_periodo_devolve_409(self, _mock):
+        self.autenticar(self.superuser)
+        self.assertEqual(self.upload().status_code, 200)
+        resp = self.upload()
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn('Já existe', str(resp.data))
+        self.assertEqual(
+            DocumentoUpload.objects.filter(
+                empresa=self.emp_a, ano=2026, mes=7, tipo='BALANCETE'
+            ).count(),
+            1,
+        )
+
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete Agosto')
+    def test_outro_mes_do_mesmo_ano_e_permitido(self, _mock):
+        self.autenticar(self.superuser)
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(self.upload(mes=8).status_code, 200)
+        self.assertEqual(DocumentoUpload.objects.filter(empresa=self.emp_a).count(), 2)
+
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete Modelo 7')
+    def test_outro_tipo_no_mesmo_periodo_e_permitido(self, _mock):
+        self.autenticar(self.superuser)
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(self.upload(tipo='MODELO7').status_code, 200)
+        self.assertEqual(DocumentoUpload.objects.filter(empresa=self.emp_a).count(), 2)
+
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='   ')
+    def test_documento_ilegivel_nao_bloqueia_nova_tentativa(self, _mock):
+        self.autenticar(self.superuser)
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(
+            DocumentoUpload.objects.get(empresa=self.emp_a).estado, 'ILEGIVEL'
+        )
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(DocumentoUpload.objects.filter(empresa=self.emp_a).count(), 2)
+
+    @patch('reconciliacao.views.classificador_service.classificar',
+           return_value={'tipo': 'BALANCETE', 'confianca': 1.0})
+    @patch('reconciliacao.extracao_service.pdf_service.extrair_texto_pdf', return_value='Balancete')
+    def test_tipo_classificado_automaticamente_tambem_bloqueia(self, _mock_txt, _mock_cls):
+        self.autenticar(self.superuser)
+        primeiro = self.upload(tipo=None)
+        self.assertEqual(primeiro.status_code, 200)
+        self.assertEqual(primeiro.data['documento']['tipo'], 'BALANCETE')
+
+        segundo = self.upload(tipo=None)
+        self.assertEqual(segundo.status_code, 409)
+        self.assertIn('Já existe', str(segundo.data))
+        self.assertEqual(DocumentoUpload.objects.filter(empresa=self.emp_a).count(), 1)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TESTE)
+class DeletarDocumentoLimpaResultadosTests(TestCase):
+    """Sem documentos no período não podem sobrar ocorrências/reconciliações."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from .motores_seed import semear_motores
+        from .regras_seed import semear_regras
+        semear_motores()
+        semear_regras()
+
+    def setUp(self):
+        from .models import Contabilidade, Reconciliacao, Regra
+        self.client = APIClient()
+        self.emp = empresa_valida(nome='Empresa A', nif='5000000010')
+        self.emp.save()
+        self.superuser = User.objects.create_superuser('root', 'root@x.com', 'pw')
+        self.regra = Regra.objects.get(codigo='IVA-001')
+
+        self.doc_julho = documento_upload(self.emp, ano=2026, mes=7)
+        self.doc_junho = documento_upload(self.emp, ano=2026, mes=6)
+
+        self.ocorrencia_julho = Ocorrencia.objects.create(
+            empresa=self.emp, ano=2026, mes=7, regra=self.regra,
+            severidade='ALTO', evidencia=_evidencia_completa(),
+        )
+        self.ocorrencia_junho = Ocorrencia.objects.create(
+            empresa=self.emp, ano=2026, mes=6, regra=self.regra,
+            severidade='ALTO', evidencia=_evidencia_completa(),
+        )
+        self.reconciliacao_julho = Reconciliacao.objects.create(
+            empresa=self.emp, ano=2026, mes=7,
+            total_campos_ok=1, total_campos_divergencia=1,
+        )
+        Contabilidade.objects.create(
+            empresa=self.emp, ano=2026, mes=7, conta_codigo='4511',
+            conta_descricao='Caixa', valor_debito=100, valor_credito=0,
+        )
+        DeclaracaoAGT.objects.create(
+            empresa=self.emp, ano=2026, mes=7, nif='5000000010',
+            regime_iva='Geral', iva_liquidado=100,
+        )
+
+    def autenticar(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def apagar(self, doc):
+        return self.client.delete(f'/api/documentos/{doc.pk}/')
+
+    def test_ultimo_documento_apaga_resultados_do_periodo(self):
+        from .models import Contabilidade, Reconciliacao
+        self.autenticar(self.superuser)
+        self.assertEqual(self.apagar(self.doc_julho).status_code, 200)
+
+        self.assertFalse(Ocorrencia.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+        self.assertFalse(Reconciliacao.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+        # dados de base (contabilidade/AGT) e outro período ficam intactos
+        self.assertTrue(Contabilidade.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+        self.assertTrue(DeclaracaoAGT.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+        self.assertTrue(Ocorrencia.objects.filter(
+            empresa=self.emp, ano=2026, mes=6).exists())
+
+    def test_apagar_um_de_varios_documentos_mantem_resultados(self):
+        from .models import Reconciliacao
+        documento_upload(self.emp, tipo='MODELO7', ano=2026, mes=7)
+        self.autenticar(self.superuser)
+        self.assertEqual(self.apagar(self.doc_julho).status_code, 200)
+
+        self.assertTrue(Ocorrencia.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+        self.assertTrue(Reconciliacao.objects.filter(
+            empresa=self.emp, ano=2026, mes=7).exists())
+
+    def test_resposta_indica_resultados_limpos(self):
+        self.autenticar(self.superuser)
+        resp = self.apagar(self.doc_julho)
+        self.assertTrue(resp.data['success'])
+        self.assertEqual(resp.data['resultados_limpos']['ocorrencias'], 1)
+        self.assertEqual(resp.data['resultados_limpos']['reconciliacoes'], 1)
+
+
+class DossieServiceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        from .motores_seed import semear_motores
+        from .regras_seed import semear_regras
+        semear_motores()
+        semear_regras()
+
+    def setUp(self):
+        self.emp = empresa_valida(nome='Cheng Yung Tung Lda', nif='5001136917')
+        self.emp.save()
+
+    def test_normalizar_contabilidade(self):
+        from . import dossie_service
+        from .models import Contabilidade
+        c1 = Contabilidade(empresa=self.emp, ano=2026, mes=7, conta_codigo='3453', conta_descricao='IVA Liquidado', valor_credito=14000)
+        c2 = Contabilidade(empresa=self.emp, ano=2026, mes=7, conta_codigo='3451', conta_descricao='IVA Suportado', valor_debito=4000)
+        norm = dossie_service.normalizar_contabilidade([c1, c2])
+        self.assertEqual(norm['iva_liquidado'], 14000.0)
+        self.assertEqual(norm['iva_dedutivel'], 4000.0)
+        self.assertEqual(norm['iva_apuramento'], 10000.0)
+        self.assertEqual(norm['iva_pagar'], 10000.0)
+
+    def test_executar_reconciliacao_automatica(self):
+        from . import dossie_service
+        from .models import Contabilidade, DeclaracaoAGT, Reconciliacao
+        Contabilidade.objects.create(
+            empresa=self.emp, ano=2026, mes=7, conta_codigo='3453', conta_descricao='IVA Liquidado', valor_credito=14000
+        )
+        Contabilidade.objects.create(
+            empresa=self.emp, ano=2026, mes=7, conta_codigo='3451', conta_descricao='IVA Suportado', valor_debito=4000
+        )
+        DeclaracaoAGT.objects.create(
+            empresa=self.emp, ano=2026, mes=7, nif='5001136917', razao_social='Cheng Yung Tung Lda',
+            regime_iva='Regime Geral', iva_liquidado=14000, iva_dedutivel=4000, iva_apurado=10000, iva_pagar=10000
+        )
+
+        res = dossie_service.executar_reconciliacao_automatica(self.emp, 2026, 7)
+        self.assertIsNotNone(res)
+        self.assertEqual(res['status'], 'CONCILIADO')
+        self.assertEqual(res['total_divergencia'], 0)
+        self.assertTrue(Reconciliacao.objects.filter(empresa=self.emp, ano=2026, mes=7).exists())
+

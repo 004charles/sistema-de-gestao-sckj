@@ -1,6 +1,17 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+export const getApiBaseUrl = () => {
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      return `${window.location.protocol}//${host}:8000/api`;
+    }
+  }
+  return process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+};
+
+export const API_URL = getApiBaseUrl();
+export const API_BASE = API_URL;
 
 const api = axios.create({
   baseURL: API_URL,
@@ -11,6 +22,7 @@ const api = axios.create({
 
 api.interceptors.request.use(
   (config) => {
+    config.baseURL = getApiBaseUrl();
     const user = localStorage.getItem('user');
     if (user) {
       const userData = JSON.parse(user);
@@ -36,6 +48,15 @@ api.interceptors.response.use(
   }
 );
 
+export const authHeaders = () => {
+  try {
+    const user = JSON.parse(localStorage.getItem('user'));
+    return user && user.token ? { Authorization: `Token ${user.token}` } : {};
+  } catch {
+    return {};
+  }
+};
+
 export const authService = {
   login: (username, password) => api.post('/auth/login/', { username, password }),
 };
@@ -43,9 +64,6 @@ export const authService = {
 export const empresaService = {
   getAll: (params) => api.get('/empresas/', { params }),
   getById: (id) => api.get(`/empresas/${id}/`),
-  create: (data) => api.post('/empresas/', data),
-  update: (id, data) => api.put(`/empresas/${id}/`, data),
-  delete: (id) => api.delete(`/empresas/${id}/`),
 };
 
 export const contabilidadeService = {

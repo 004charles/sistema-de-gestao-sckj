@@ -1,232 +1,251 @@
-import React, { useState } from 'react';
-import {
-  Box,
-  Typography,
-  Button,
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  TextField,
-  Chip,
-  MenuItem,
-  Grid,
-} from '@mui/material';
-import {
-  Add as AddIcon,
-  Edit as EditIcon,
-  Delete as DeleteIcon,
-  Search as SearchIcon,
-} from '@mui/icons-material';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { empresaService } from '../services/api';
+
+const BADGE_ESTADO = {
+  ATIVA: 'badge-success',
+  INATIVA: 'badge-secondary',
+  SUSPENSA: 'badge-warning',
+  ENCERRADA: 'badge-danger',
+};
+
+const SpinDots = () => (
+  <span className="atbd-spin-dots spin-lg">
+    <span className="spin-dot badge-dot dot-primary"></span>
+    <span className="spin-dot badge-dot dot-primary"></span>
+    <span className="spin-dot badge-dot dot-primary"></span>
+    <span className="spin-dot badge-dot dot-primary"></span>
+  </span>
+);
 
 const Empresas = () => {
-  const [open, setOpen] = useState(false);
-  const [empresas, setEmpresas] = useState([
-    { id: 1, nome: 'Empresa Alpha Lda', nif: '5417689234', regime: 'Geral', ativo: true },
-    { id: 2, nome: 'Beta Comércio', nif: '5417689235', regime: 'Geral', ativo: true },
-    { id: 3, nome: 'Gamma Serviços', nif: '5417689236', regime: 'Simplificado', ativo: true },
-    { id: 4, nome: 'Delta Indústria', nif: '5417689237', regime: 'Geral', ativo: false },
-  ]);
+  const { t } = useTranslation();
+  const [empresas, setEmpresas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState('');
+  const [busca, setBusca] = useState('');
+  const [estadoFiltro, setEstadoFiltro] = useState('');
 
-  const [formData, setFormData] = useState({
-    nome: '',
-    nif: '',
-    regime_iva: 'Geral',
-    endereco: '',
-    telefone: '',
-    email: '',
+  const carregarEmpresas = useCallback(async () => {
+    setLoading(true);
+    setErro('');
+    try {
+      const response = await empresaService.getAll();
+      const dados = Array.isArray(response.data)
+        ? response.data
+        : response.data?.results || [];
+      setEmpresas(dados);
+    } catch (err) {
+      setErro(
+        err.response?.status === 401
+          ? t('common.error')
+          : t('companies.loadError')
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    carregarEmpresas();
+  }, [carregarEmpresas]);
+
+  const empresasFiltradas = empresas.filter((empresa) => {
+    const texto = busca.toLowerCase();
+    const correspondeBusca =
+      !texto ||
+      (empresa.nome || '').toLowerCase().includes(texto) ||
+      (empresa.nif || '').includes(texto);
+    const correspondeEstado = !estadoFiltro || empresa.estado === estadoFiltro;
+    return correspondeBusca && correspondeEstado;
   });
 
-  const regimes = ['Geral', 'Simplificado', 'Isento'];
-
-  const handleClickOpen = () => {
-    setOpen(true);
-  };
-
-  const handleClose = () => {
-    setOpen(false);
-    setFormData({ nome: '', nif: '', regime_iva: 'Geral', endereco: '', telefone: '', email: '' });
-  };
-
-  const handleSubmit = () => {
-    const newEmpresa = {
-      id: empresas.length + 1,
-      ...formData,
-      ativo: true,
+  const rotuloEstado = (estado) => {
+    const map = {
+      ATIVA: t('companies.active'),
+      INATIVA: t('companies.inactive'),
+      SUSPENSA: t('companies.suspended'),
+      ENCERRADA: t('companies.closed'),
     };
-    setEmpresas([...empresas, newEmpresa]);
-    handleClose();
+    return map[estado] || estado;
+  };
+
+  const rotuloTipo = (tipo) => {
+    const map = {
+      PS: t('companies.entityTypes.ps'),
+      ENI: t('companies.entityTypes.eni'),
+      SQ: t('companies.entityTypes.sq'),
+      SA: t('companies.entityTypes.sa'),
+      COOP: t('companies.entityTypes.coop'),
+      ASS: t('companies.entityTypes.ass'),
+      FUND: t('companies.entityTypes.fund'),
+      OUTRO: t('companies.entityTypes.outro'),
+    };
+    return map[tipo] || '—';
   };
 
   return (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
-        <Typography variant="h4" sx={{ color: '#323130', fontWeight: 600 }}>
-          Empresas
-        </Typography>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={handleClickOpen}
-          sx={{
-            backgroundColor: '#0078D4',
-            textTransform: 'none',
-            '&:hover': { backgroundColor: '#005A9E' },
-          }}
-        >
-          Nova Empresa
-        </Button>
-      </Box>
+    <>
+      <div className="row">
+        <div className="col-12">
+          <div className="breadcrumb-main">
+            <h4 className="text-capitalize breadcrumb-title">
+              {t('navigation.companies')}
+            </h4>
+          </div>
+        </div>
+      </div>
 
-      <Paper sx={{ padding: 3 }}>
-        <Box sx={{ display: 'flex', gap: 2, marginBottom: 3 }}>
-          <TextField
-            size="small"
-            placeholder="Buscar empresa..."
-            sx={{ flexGrow: 1 }}
-            InputProps={{
-              startAdornment: <SearchIcon sx={{ color: '#A19F9D', marginRight: 1 }} />,
-            }}
-          />
-        </Box>
-
-        <TableContainer>
-          <Table>
-            <TableHead>
-              <TableRow sx={{ backgroundColor: '#F3F2F1' }}>
-                <TableCell sx={{ fontWeight: 600, color: '#323130' }}>Nome</TableCell>
-                <TableCell sx={{ fontWeight: 600, color: '#323130' }}>NIF</TableCell>
-                <TableCell sx={{ fontWeight: 600, color: '#323130' }}>Regime IVA</TableCell>
-                <TableCell sx={{ fontWeight: 600, color: '#323130' }}>Status</TableCell>
-                <TableCell sx={{ fontWeight: 600, color: '#323130' }}>Ações</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {empresas.map((empresa) => (
-                <TableRow key={empresa.id} sx={{ '&:hover': { backgroundColor: '#FAF9F8' } }}>
-                  <TableCell>{empresa.nome}</TableCell>
-                  <TableCell>{empresa.nif}</TableCell>
-                  <TableCell>{empresa.regime}</TableCell>
-                  <TableCell>
-                    <Chip
-                      label={empresa.ativo ? 'Ativo' : 'Inativo'}
-                      size="small"
-                      sx={{
-                        backgroundColor: empresa.ativo ? '#E6F4E6' : '#F3F2F1',
-                        color: empresa.ativo ? '#107C10' : '#605E5C',
-                      }}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <IconButton size="small" sx={{ color: '#0078D4' }}>
-                      <EditIcon />
-                    </IconButton>
-                    <IconButton size="small" sx={{ color: '#D13438' }}>
-                      <DeleteIcon />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Paper>
-
-      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-        <DialogTitle sx={{ backgroundColor: '#0078D4', color: '#FFFFFF' }}>
-          Nova Empresa
-        </DialogTitle>
-        <DialogContent sx={{ padding: 3 }}>
-          <Grid container spacing={2} sx={{ marginTop: 1 }}>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Nome da Empresa"
-                value={formData.nome}
-                onChange={(e) => setFormData({ ...formData, nome: e.target.value })}
-                size="small"
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="NIF"
-                value={formData.nif}
-                onChange={(e) => setFormData({ ...formData, nif: e.target.value })}
-                size="small"
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                select
-                label="Regime IVA"
-                value={formData.regime_iva}
-                onChange={(e) => setFormData({ ...formData, regime_iva: e.target.value })}
-                size="small"
+      {erro && (
+        <div className="row">
+          <div className="col-12">
+            <div className="alert alert-danger" role="alert">
+              <button
+                type="button"
+                className="close"
+                aria-label="Close"
+                onClick={() => setErro('')}
               >
-                {regimes.map((regime) => (
-                  <MenuItem key={regime} value={regime}>
-                    {regime}
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Endereço"
-                value={formData.endereco}
-                onChange={(e) => setFormData({ ...formData, endereco: e.target.value })}
-                size="small"
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="Telefone"
-                value={formData.telefone}
-                onChange={(e) => setFormData({ ...formData, telefone: e.target.value })}
-                size="small"
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="Email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                size="small"
-              />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions sx={{ padding: 2 }}>
-          <Button onClick={handleClose} sx={{ color: '#605E5C', textTransform: 'none' }}>
-            Cancelar
-          </Button>
-          <Button
-            onClick={handleSubmit}
-            variant="contained"
-            sx={{
-              backgroundColor: '#0078D4',
-              textTransform: 'none',
-              '&:hover': { backgroundColor: '#005A9E' },
-            }}
-          >
-            Salvar
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+                <span aria-hidden="true">&times;</span>
+              </button>
+              {erro}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="row">
+        <div className="col-12">
+          <div className="card">
+            <div className="card-header color-dark fw-500">
+              {t('navigation.companies')}
+            </div>
+            <div className="card-body">
+              <div
+                className="d-flex flex-wrap mb-25"
+                style={{ gap: 12, alignItems: 'center' }}
+              >
+                <div className="form-group mb-0" style={{ flex: '1 1 260px' }}>
+                  <div className="input-container icon-left position-relative">
+                    <span className="input-icon icon-left">
+                      <i className="la la-search"></i>
+                    </span>
+                    <input
+                      type="text"
+                      className="form-control form-control-default"
+                      placeholder={t('companies.searchPlaceholder')}
+                      value={busca}
+                      onChange={(e) => setBusca(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="form-group mb-0" style={{ minWidth: 180 }}>
+                  <select
+                    className="form-control form-control-default"
+                    value={estadoFiltro}
+                    onChange={(e) => setEstadoFiltro(e.target.value)}
+                  >
+                    <option value="">{t('common.filter')}</option>
+                    <option value="ATIVA">{t('companies.active')}</option>
+                    <option value="INATIVA">{t('companies.inactive')}</option>
+                    <option value="SUSPENSA">{t('companies.suspended')}</option>
+                    <option value="ENCERRADA">{t('companies.closed')}</option>
+                  </select>
+                </div>
+              </div>
+
+              {loading ? (
+                <div className="text-center p-4">
+                  <SpinDots />
+                </div>
+              ) : (
+                <div className="table4 bg-white mb-10">
+                  <div className="table-responsive">
+                    <table className="table mb-0">
+                      <thead>
+                        <tr className="userDatatable-header">
+                          <th>
+                            <span className="userDatatable-title">
+                              {t('companies.name')}
+                            </span>
+                          </th>
+                          <th>
+                            <span className="userDatatable-title">
+                              {t('profile.nif')}
+                            </span>
+                          </th>
+                          <th>
+                            <span className="userDatatable-title">
+                              {t('companies.entityType')}
+                            </span>
+                          </th>
+                          <th>
+                            <span className="userDatatable-title">
+                              {t('companies.regimeIva')}
+                            </span>
+                          </th>
+                          <th>
+                            <span className="userDatatable-title">
+                              {t('dashboard.status')}
+                            </span>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {empresasFiltradas.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="text-center text-muted p-4">
+                              {t('companies.noResults')}
+                            </td>
+                          </tr>
+                        ) : (
+                          empresasFiltradas.map((empresa) => (
+                            <tr key={empresa.id}>
+                              <td>
+                                <div className="userDatatable-content fw-600">
+                                  {empresa.nome}
+                                </div>
+                              </td>
+                              <td>
+                                <div
+                                  className="userDatatable-content"
+                                  style={{ fontFamily: 'monospace', fontWeight: 600 }}
+                                >
+                                  {empresa.nif}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="userDatatable-content">
+                                  {rotuloTipo(empresa.tipo_entidade)}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="userDatatable-content">
+                                  {empresa.regime_iva || '—'}
+                                </div>
+                              </td>
+                              <td>
+                                <span
+                                  className={`badge ${
+                                    BADGE_ESTADO[empresa.estado] || 'badge-primary'
+                                  }`}
+                                >
+                                  {rotuloEstado(empresa.estado)}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
   );
 };
 
