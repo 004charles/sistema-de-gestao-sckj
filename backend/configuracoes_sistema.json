@@ -1,0 +1,17 @@
+{
+  "nome_sistema": "SCKJ - Sistema de Reconciliação Contabilística & Fiscal",
+  "versao_sistema": "v2.4.0 (OGE Angola 2026)",
+  "modo_manutencao": false,
+  "idioma_padrao": "pt",
+  "fuso_horario": "Africa/Luanda (GMT+1)",
+  "limite_upload_mb": 50,
+  "taxa_iva_geral": 14,
+  "taxa_retencao_fonte_ii": 6.5,
+  "taxa_inss_patronal": 8,
+  "taxa_inss_trabalhador": 3,
+  "limite_alerta_risco_kz": 5000000,
+  "prazo_inss_dia": 10,
+  "prazo_iva_dia": 31,
+  "notificacoes_email_ativas": true,
+  "email_alertas_fiscal": "auditoria@sckj.co.ao"
+}

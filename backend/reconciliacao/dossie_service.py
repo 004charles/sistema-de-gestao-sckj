@@ -23,6 +23,7 @@ import pdfplumber
 import pypdfium2 as pdfium
 
 from .models import DocumentoUpload, Empresa, Contabilidade, DeclaracaoAGT
+from . import balancete
 from . import pdf_service
 from . import regra_engine
 
@@ -188,6 +189,32 @@ def is_dossie_mensal(caminho_pdf):
         return False
 
 
+
+def _periodo_explicito(tipo, texto):
+    """Período declarado pelo próprio documento, quando este o indica.
+
+    Devolve `(None, None)` se o documento não o disser — nesse caso vale a
+    heurística genérica.
+    """
+    try:
+        if tipo == 'BALANCETE':
+            from . import balancete
+            return balancete.periodo(texto)
+        if tipo == 'FOLHA_SS':
+            from . import comprovativo
+            for guia in comprovativo.extrair_guias(texto):
+                if guia.get('mes'):
+                    return guia.get('ano'), guia['mes']
+        if tipo == 'MODELO7':
+            from . import agt_modelo7
+            lido = agt_modelo7.parse(texto)
+            if lido.get('mes'):
+                return lido.get('ano'), lido['mes']
+    except Exception:
+        logger.exception('Falha a ler o período explícito de um %s', tipo)
+    return None, None
+
+
 def desmembrar_e_processar_dossie(caminho_pdf, empresa, ano_padrao=None, mes_padrao=None):
     """Desmembra o PDF do dossiê em blocos de páginas, cria DocumentoUpload para cada um,
     sincroniza com as tabelas de contabilidade/declarações e executa a auditoria integrada.
@@ -259,7 +286,15 @@ def desmembrar_e_processar_dossie(caminho_pdf, empresa, ano_padrao=None, mes_pad
             
         texto_completo = '\n\n'.join(dados['textos'])
         ano_doc, mes_doc, nif_doc = detectar_periodo_e_nif(texto_completo)
-        
+
+        # Alguns documentos dizem explicitamente a que período respeitam, e
+        # esse valor vale mais do que a contagem de nomes de meses no texto:
+        # uma guia de INSS de Julho é emitida e vence em Agosto, pelo que a
+        # heurística genérica a arquivava como sendo de Agosto.
+        ano_exp, mes_exp = _periodo_explicito(tipo, texto_completo)
+        if mes_exp:
+            ano_doc, mes_doc = ano_exp or ano_doc, mes_exp
+
         ano_final = ano_doc or ano_padrao
         mes_final = mes_doc or mes_padrao
 
@@ -306,32 +341,34 @@ def desmembrar_e_processar_dossie(caminho_pdf, empresa, ano_padrao=None, mes_pad
         
         # Sincroniza Contabilidade a partir do Balancete
         if doc_balancete_obj and doc_balancete_obj.texto_extraido:
-            b_dados = pdf_service.extrair_dados_balancete(doc_balancete_obj.texto_extraido)
-            # Limpa dados anteriores do mesmo período para evitar duplicação
-            Contabilidade.objects.filter(empresa=empresa, ano=ano_sync, mes=mes_sync).delete()
-            contas = [
-                ('6131', 'Vendas - Mercado Nacional', Decimal('0'), b_dados['vendas'], -b_dados['vendas']),
-                ('4511', 'Caixa Kwanza', Decimal('0'), b_dados['caixa_saldo_credor'], -b_dados['caixa_saldo_credor']),
-                ('3453', 'IVA Liquidado - Operações Gerais', b_dados['iva_liquidado'], b_dados['iva_liquidado'], Decimal('0')),
-                ('3451', 'IVA Suportado / Dedutível', b_dados['iva_suportado'], b_dados['iva_suportado'], Decimal('0')),
-                ('3456', 'IVA a Pagar de Apuramento', Decimal('0'), b_dados['iva_pagar'], -b_dados['iva_pagar']),
-                ('3431', 'Imposto de Rendimento do Trabalho (IRT)', Decimal('0'), b_dados['irt_retido'], -b_dados['irt_retido']),
-                ('3492', 'Segurança Social (INSS)', Decimal('0'), b_dados['inss_retido'], -b_dados['inss_retido']),
-                ('3493', 'Retenção na Fonte Prestadores (6,5%)', Decimal('0'), b_dados['retencao_prestadores'], -b_dados['retencao_prestadores']),
-                ('722', 'Remunerações - Pessoal', b_dados['remuneracoes'], Decimal('0'), b_dados['remuneracoes']),
-            ]
-            for cod, desc, deb, cred, sal in contas:
-                if deb > 0 or cred > 0:
-                    Contabilidade.objects.create(
-                        empresa=empresa,
-                        ano=ano_sync,
-                        mes=mes_sync,
-                        conta_codigo=cod,
-                        conta_descricao=desc,
-                        valor_debito=deb,
-                        valor_credito=cred,
-                        saldo=sal,
-                    )
+            # Lê-se o balancete tal como está — uma linha por conta. A versão
+            # anterior fabricava nove contas sintéticas a partir de valores
+            # soltos; como nunca equilibravam, a regra do balanceamento
+            # acusava milhões de diferença em contabilidades correctas.
+            lido = balancete.parse(doc_balancete_obj.texto_extraido)
+            Contabilidade.objects.filter(
+                empresa=empresa, ano=ano_sync, mes=mes_sync
+            ).delete()
+
+            # Só as contas de maior detalhe: gravar também os níveis
+            # agregadores contaria o mesmo movimento várias vezes.
+            for linha in lido['folhas']:
+                Contabilidade.objects.create(
+                    empresa=empresa,
+                    ano=ano_sync,
+                    mes=mes_sync,
+                    conta_codigo=linha['codigo'],
+                    conta_descricao=linha['descricao'],
+                    valor_debito=linha['mov_debito'],
+                    valor_credito=linha['mov_credito'],
+                    saldo=linha['saldo_debito'] - linha['saldo_credito'],
+                )
+            logger.info(
+                'Balancete lido: %s contas (%s folhas), débito %s / crédito %s, '
+                'equilibrado=%s',
+                len(lido['linhas']), len(lido['folhas']),
+                lido['total_debito'], lido['total_credito'], lido['equilibrado'],
+            )
 
         # Sincroniza DeclaracaoAGT a partir do Modelo 7
         if doc_modelo7_obj and doc_modelo7_obj.texto_extraido:

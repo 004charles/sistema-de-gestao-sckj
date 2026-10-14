@@ -1,13 +1,45 @@
 import axios from 'axios';
 
+/**
+ * Endereço da API.
+ *
+ * A versão anterior forçava a porta 8000 sempre que o host não fosse
+ * localhost, ignorando `REACT_APP_API_URL`. Isso partia dois cenários: o
+ * deploy Vercel/Render descrito no README (o frontend chamava
+ * `https://dominio:8000/api`, que não existe) e qualquer backend local
+ * noutra porta — como o `runserver 0.0.0.0:8080` usado aqui.
+ *
+ * Ordem agora: configuração explícita > porta de desenvolvimento > mesma
+ * origem. Nunca se inventa uma porta num host remoto.
+ */
+const PORTA_DEV_PADRAO = process.env.REACT_APP_API_PORT || '8000';
+
 export const getApiBaseUrl = () => {
-  if (typeof window !== 'undefined' && window.location.hostname) {
-    const host = window.location.hostname;
-    if (host !== 'localhost' && host !== '127.0.0.1') {
-      return `${window.location.protocol}//${host}:8000/api`;
-    }
+  // 1. Configuração explícita ganha sempre — inclusive em produção.
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
   }
-  return process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    const { protocol, hostname, port, origin } = window.location;
+    // 2. Em desenvolvimento local ou em rede local (LAN), o backend Django está na porta 8000
+    const isLocalOrLAN =
+      port === '3000' ||
+      port === '3001' ||
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      /^192\.168\./.test(hostname) ||
+      /^10\./.test(hostname) ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
+
+    if (isLocalOrLAN) {
+      return `${protocol}//${hostname}:${PORTA_DEV_PADRAO}/api`;
+    }
+    // 3. Em produção na nuvem com reverse proxy ou mesma origem
+    return `${origin}/api`;
+  }
+
+  return 'http://127.0.0.1:8000/api';
 };
 
 export const API_URL = getApiBaseUrl();
@@ -64,6 +96,53 @@ export const authService = {
 export const empresaService = {
   getAll: (params) => api.get('/empresas/', { params }),
   getById: (id) => api.get(`/empresas/${id}/`),
+  create: (data) => api.post('/empresas/', data),
+  update: (id, data) => api.put(`/empresas/${id}/`, data),
+  patch: (id, data) => api.patch(`/empresas/${id}/`, data),
+  delete: (id) => api.delete(`/empresas/${id}/`),
+};
+
+export const adminService = {
+  getEstatisticas: () => api.get('/admin/estatisticas/'),
+  getUtilizadores: () => api.get('/admin/utilizadores/'),
+  createUtilizador: (data) => api.post('/admin/utilizadores/', data),
+  updateUtilizador: (id, data) => api.put(`/admin/utilizadores/${id}/`, data),
+  patchUtilizador: (id, data) => api.patch(`/admin/utilizadores/${id}/`, data),
+  deleteUtilizador: (id) => api.delete(`/admin/utilizadores/${id}/`),
+  getRegras: (params) => api.get('/regras/', { params }),
+  updateRegra: (id, data) => api.patch(`/regras/${id}/`, data),
+  getOcorrencias: (params) => api.get('/ocorrencias/', { params }),
+  updateOcorrencia: (id, data) => api.patch(`/ocorrencias/${id}/`, data),
+  executarOcorrencias: (data) => api.post('/ocorrencias/executar/', data),
+  getDocumentos: (params) => api.get('/documentos/listar/', { params }),
+  deleteDocumento: (id) => api.delete(`/documentos/${id}/`),
+  getConfiguracoes: () => api.get('/admin/configuracoes/'),
+  updateConfiguracoes: (data) => api.post('/admin/configuracoes/', data),
+  registrarTentativa: (data) => api.post('/admin/registro-tentativa/', data),
+  getRegistrosAcesso: () => api.get('/admin/registros-acesso/'),
+  getPgc: (params) => api.get('/admin/pgc/', { params }),
+  exportarPgcExcel: () => api.get('/admin/pgc/exportar-excel/', { responseType: 'blob' }),
+};
+
+export const pgcService = {
+  getPgc: (params) => api.get('/pgc/', { params }),
+  exportarPgcExcel: () => api.get('/pgc/exportar-excel/', { responseType: 'blob' }),
+};
+
+export const legislacaoService = {
+  getLegislacao: (params) => api.get('/legislacao/', { params }),
+  exportarExcel: () => api.get('/legislacao/exportar-excel/', { responseType: 'blob' }),
+};
+
+export const lancamentoService = {
+  getAll: (params) => api.get('/contabilidade/lancamentos/', { params }),
+  getById: (id) => api.get(`/contabilidade/lancamentos/${id}/`),
+  create: (data) => api.post('/contabilidade/lancamentos/', data),
+  update: (id, data) => api.put(`/contabilidade/lancamentos/${id}/`, data),
+  patch: (id, data) => api.patch(`/contabilidade/lancamentos/${id}/`, data),
+  delete: (id) => api.delete(`/contabilidade/lancamentos/${id}/`),
+  getRazao: (params) => api.get('/contabilidade/razao/', { params }),
+  getBalanceteGerado: (params) => api.get('/contabilidade/balancete-gerado/', { params }),
 };
 
 export const contabilidadeService = {
@@ -100,6 +179,35 @@ export const aiService = {
     api.post('/ai/analise-empresa/', { empresa_id: empresaId, ano, mes }),
   chat: (mensagem, contextoTipo, contextoId) =>
     api.post('/ai/chat/', { mensagem, contexto_tipo: contextoTipo, contexto_id: contextoId }),
+};
+
+export const auditoriaService = {
+  getRasto: (empresaId, ano, mes) => api.get(`/auditoria/${empresaId}/${ano}/${mes}/rasto/`),
+  getParecer: (empresaId, ano, mes) => api.get(`/auditoria/${empresaId}/${ano}/${mes}/parecer/`),
+  gerarParecer: (empresaId, ano, mes) => api.post(`/auditoria/${empresaId}/${ano}/${mes}/parecer/`),
+};
+
+export const analiseService = {
+  analisarDocumentos: (docContabId, docAgtId, idioma = 'pt') =>
+    api.post('/analises/analise-documentos/', {
+      documento_contabilidade_id: docContabId,
+      documento_agt_id: docAgtId,
+      idioma,
+    }),
+  getHistorico: () => api.get('/analises/historico/'),
+  deleteAnalise: (id) => api.delete(`/analises/historico/${id}/`),
+  exportarExcel: (analiseId, payload = {}) => {
+    if (analiseId) {
+      return api.get(`/analises/${analiseId}/exportar-excel/`, { responseType: 'blob' });
+    }
+    return api.post('/analises/exportar-excel/', payload, { responseType: 'blob' });
+  },
+};
+
+export const consolidacaoService = {
+  getConsolidacao: (empresaId, ano) => api.get(`/consolidacao-anual/${empresaId}/${ano}/`),
+  exportarExcel: (empresaId, ano) =>
+    api.get(`/consolidacao-anual/${empresaId}/${ano}/exportar-excel/`, { responseType: 'blob' }),
 };
 
 export default api;

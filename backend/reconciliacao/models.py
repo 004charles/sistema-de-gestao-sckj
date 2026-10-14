@@ -3,6 +3,11 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from .taxas import (
+    CARACTERISTICAS_REGIME, REGIMES_IVA as REGIMES_IVA_CHOICES,
+    REGIME_GERAL, normalizar_regime, regime_por_volume,
+)
+
 
 class Empresa(models.Model):
     TIPO_ENTIDADE_CHOICES = [
@@ -50,7 +55,18 @@ class Empresa(models.Model):
     email = models.EmailField(blank=True, null=True)
     website = models.URLField(blank=True, null=True)
 
-    regime_iva = models.CharField(max_length=50)
+    regime_iva = models.CharField(
+        max_length=50, choices=REGIMES_IVA_CHOICES, default=REGIME_GERAL,
+        help_text='Determinado pelo volume de negócios do ano anterior.',
+    )
+    volume_negocios_anual = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text='Volume de negócios do ano anterior, que fixa o regime de IVA.',
+    )
+    ano_volume_negocios = models.IntegerField(
+        null=True, blank=True,
+        help_text='Exercício a que respeita o volume de negócios declarado.',
+    )
 
     reparticao_fiscal = models.CharField(max_length=100, blank=True, default='')
     contabilista_nome = models.CharField(max_length=120, blank=True, default='')
@@ -82,6 +98,52 @@ class Empresa(models.Model):
                 'data_inicio_atividade':
                     'A data de início de atividade não pode ser anterior à data de constituição.'
             })
+
+    def _canonizar_regime(self):
+        """Aceita qualquer grafia conhecida e guarda o código canónico.
+
+        A base tinha "Geral", "Regime Geral" e "Simplificado" a conviver, o
+        que impedia filtrar motores por regime. A normalização tem de correr
+        em `clean_fields`, antes da validação das opções: `full_clean()`
+        valida os `choices` primeiro, e rejeitaria "Geral" antes de o `save()`
+        ter oportunidade de o converter.
+        """
+        canonico = normalizar_regime(self.regime_iva)
+        if canonico:
+            self.regime_iva = canonico
+
+    def clean_fields(self, exclude=None):
+        self._canonizar_regime()
+        return super().clean_fields(exclude=exclude)
+
+    def save(self, *args, **kwargs):
+        self._canonizar_regime()
+        return super().save(*args, **kwargs)
+
+    @property
+    def caracteristicas_regime(self):
+        """O que a lei impõe a este regime: taxa, dedução, obrigações."""
+        return CARACTERISTICAS_REGIME.get(self.regime_iva, {})
+
+    @property
+    def tem_obrigacoes_iva(self):
+        """O regime de exclusão não liquida nem deduz IVA."""
+        return self.caracteristicas_regime.get('tem_obrigacoes_iva', True)
+
+    @property
+    def regime_esperado(self):
+        """Regime que o volume de negócios declarado impõe, se conhecido."""
+        return regime_por_volume(self.volume_negocios_anual)
+
+    @property
+    def regime_divergente(self):
+        """True quando o regime registado não corresponde ao volume de negócios.
+
+        Não é, por si só, um erro: pode haver opção legítima por um regime
+        mais exigente. É por isso um alerta de confirmação, não de infracção.
+        """
+        esperado = self.regime_esperado
+        return bool(esperado and esperado != self.regime_iva)
 
     @property
     def tem_historico_fiscal(self):
@@ -569,3 +631,274 @@ class Ocorrencia(models.Model):
 
     def __str__(self):
         return f"{self.regra.codigo} {self.mes}/{self.ano} - {self.empresa.nome}"
+
+
+class ObrigacaoFiscal(models.Model):
+    """Obrigação declarativa ou de pagamento de um período (§22).
+
+    É o que permite ao sistema olhar para a frente: até agora só sabia
+    comentar documentos já carregados. Cada obrigação nasce do calendário
+    fiscal (`calendario_service`) com a sua data-limite e base legal, e
+    fecha quando há prova documental do cumprimento.
+
+    `valor_declarado` vs `valor_pago` responde à pergunta mais cara da
+    fiscalidade angolana: declarei, mas cheguei a pagar?
+    """
+
+    TIPO_CHOICES = [
+        ('DECLARACAO', 'Entrega de declaração'),
+        ('PAGAMENTO', 'Pagamento de imposto'),
+    ]
+    ESTADO_CHOICES = [
+        ('PENDENTE', 'Por cumprir, dentro do prazo'),
+        ('A_VENCER', 'Por cumprir, prazo a terminar'),
+        ('VENCIDA', 'Prazo ultrapassado'),
+        ('CUMPRIDA', 'Cumprida no prazo'),
+        ('CUMPRIDA_FORA_PRAZO', 'Cumprida fora do prazo'),
+    ]
+
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.CASCADE, related_name='obrigacoes'
+    )
+    imposto = models.CharField(max_length=30)
+    tipo = models.CharField(max_length=15, choices=TIPO_CHOICES)
+    ano = models.IntegerField()
+    mes = models.IntegerField()
+
+    data_limite = models.DateField()
+    data_cumprimento = models.DateField(null=True, blank=True)
+    estado = models.CharField(
+        max_length=25, choices=ESTADO_CHOICES, default='PENDENTE'
+    )
+
+    valor_declarado = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True
+    )
+    valor_pago = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True
+    )
+
+    documento = models.ForeignKey(
+        DocumentoUpload, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='obrigacoes_cumpridas',
+        help_text='Prova documental do cumprimento.',
+    )
+    base_legal = models.ForeignKey(
+        BaseLegal, on_delete=models.PROTECT, related_name='obrigacoes'
+    )
+    observacoes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fiscal_obrigacao'
+        ordering = ['data_limite', 'imposto']
+        unique_together = ('empresa', 'imposto', 'tipo', 'ano', 'mes')
+
+    def __str__(self):
+        return f"{self.imposto} {self.tipo} {self.mes:02d}/{self.ano} - {self.estado}"
+
+    @property
+    def dias_para_limite(self):
+        """Dias até à data-limite. Negativo = prazo ultrapassado."""
+        from datetime import date
+        return (self.data_limite - date.today()).days
+
+    @property
+    def em_falta(self):
+        """Montante declarado por liquidar."""
+        if self.valor_declarado is None:
+            return Decimal('0.00')
+        return max(self.valor_declarado - (self.valor_pago or Decimal('0')), Decimal('0.00'))
+
+
+class RegistroAcessoAdmin(models.Model):
+    """Registo de auditoria de segurança de tentativas de acesso ao Portal Administrativo."""
+    RESULTADO_CHOICES = [
+        ('PERMITIDO', 'Permitido (Administrador)'),
+        ('NEGADO', 'Bloqueado / Não Autorizado'),
+    ]
+
+    utilizador = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tentativas_acesso_admin'
+    )
+    username = models.CharField(max_length=150, default='', blank=True)
+    empresa_nome = models.CharField(max_length=255, blank=True, default='')
+    ip_origem = models.CharField(max_length=45, blank=True, default='')
+    user_agent = models.TextField(blank=True, default='')
+    rota_tentada = models.CharField(max_length=255, default='/admin-gestao')
+    motivo = models.CharField(max_length=255, default='Acesso reservado ao Administrador do Sistema.')
+    resultado = models.CharField(max_length=20, choices=RESULTADO_CHOICES, default='NEGADO')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seguranca_registro_acesso_admin'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.resultado}] {self.username} -> {self.rota_tentada} em {self.created_at}"
+
+
+class LancamentoContabilistico(models.Model):
+    """
+    Registo oficial no Livro Diário de Lançamentos Contabilísticos (Partidas Dobradas).
+    Cada lançamento obedece rigorosamente às contas do PGC (Decreto n.º 82/01)
+    e à equação fundamental da contabilidade: Total Débito == Total Crédito.
+    """
+    TIPO_DIARIO_CHOICES = [
+        ('GERAL', 'Diário Geral'),
+        ('COMPRAS', 'Diário de Compras e Fornecedores'),
+        ('VENDAS', 'Diário de Vendas e Clientes'),
+        ('BANCOS', 'Diário de Movimentos Bancários'),
+        ('CAIXA', 'Diário de Caixa'),
+        ('OPERACOES_DIVERSAS', 'Operações Diversas'),
+        ('DIVERSOS', 'Operações Diversas'),
+        ('APURAMENTO_IVA', 'Apuramento e Liquidação de IVA'),
+        ('FECHO_EXERCICIO', 'Fecho do Exercício e Apuramento de Resultados'),
+    ]
+
+    ESTADO_CHOICES = [
+        ('CONFIRMADO', 'Confirmado / Escriturado'),
+        ('RASCUNHO', 'Rascunho / Provisório'),
+        ('ANULADO', 'Anulado / Estornado'),
+    ]
+
+    empresa = models.ForeignKey(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name='lancamentos',
+        help_text='Empresa titular da escrituração contabilística.'
+    )
+    numero_diario = models.CharField(
+        max_length=50,
+        help_text='Número sequencial do lançamento (ex: DIA-2026-0001).'
+    )
+    data_lancamento = models.DateField(
+        help_text='Data do facto patrimonial / operação contabilística.'
+    )
+    tipo_diario = models.CharField(
+        max_length=30,
+        choices=TIPO_DIARIO_CHOICES,
+        default='GERAL'
+    )
+    descricao = models.CharField(
+        max_length=255,
+        help_text='Histórico ou descritivo da operação contabilística.'
+    )
+    documento_referencia = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text='N.º da Fatura, Recibo, Guia de Entrega ou Documento de Suporte.'
+    )
+    documento_anexo = models.ForeignKey(
+        DocumentoUpload,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='lancamentos_suporte',
+        help_text='Comprovativo digital arquivado no repositório.'
+    )
+    ano = models.IntegerField()
+    mes = models.IntegerField()
+    total_debito = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    total_credito = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default='CONFIRMADO'
+    )
+    criado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='lancamentos_criados'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'contabilidade_lancamento'
+        ordering = ['-data_lancamento', '-id']
+        unique_together = ('empresa', 'numero_diario', 'ano')
+
+    def __str__(self):
+        return f"[{self.numero_diario}] {self.data_lancamento.strftime('%d/%m/%Y')} - {self.descricao} ({self.total_debito} Kz)"
+
+    def clean(self):
+        super().clean()
+        if self.total_debito != self.total_credito:
+            raise ValidationError(
+                f"Lançamento desbalanceado: Total Débito ({self.total_debito}) difere do Total Crédito ({self.total_credito})."
+            )
+
+
+class LinhaLancamento(models.Model):
+    """
+    Linha individual de débito ou crédito associada a um Lançamento Contabilístico.
+    Mapeada a uma conta do PGC de Angola (Decreto n.º 82/01).
+    """
+    lancamento = models.ForeignKey(
+        LancamentoContabilistico,
+        on_delete=models.CASCADE,
+        related_name='linhas'
+    )
+    ordem = models.IntegerField(default=1)
+    conta_codigo = models.CharField(
+        max_length=30,
+        help_text='Código da conta do PGC (ex: 31.1.1, 34.5.2, 43.1.2).'
+    )
+    conta_nome = models.CharField(
+        max_length=200,
+        help_text='Designação oficial da conta no PGC.'
+    )
+    debito = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    credito = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    descricao_linha = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Descritivo específico para a linha, se diferente do cabeçalho.'
+    )
+    terceiro_nif = models.CharField(
+        max_length=20,
+        blank=True,
+        default='',
+        help_text='NIF do cliente, fornecedor ou entidade terceira.'
+    )
+    terceiro_nome = models.CharField(
+        max_length=150,
+        blank=True,
+        default='',
+        help_text='Nome do cliente, fornecedor ou terceiro.'
+    )
+
+    class Meta:
+        db_table = 'contabilidade_linha_lancamento'
+        ordering = ['lancamento', 'ordem', 'id']
+
+    def __str__(self):
+        natureza = f"D: {self.debito}" if self.debito > 0 else f"C: {self.credito}"
+        return f"{self.conta_codigo} - {self.conta_nome} | {natureza}"
+

@@ -1,17 +1,18 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { ToastContainer } from 'react-toastify';
+import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import './styles/template.css';
 import LoginPage from './components/auth/LoginPage';
 import MainLayout from './components/common/MainLayout';
-import Dashboard from './pages/Dashboard';
-import Empresas from './pages/Empresas';
-import Configuracoes from './pages/Configuracoes';
 import Documentos from './pages/Documentos';
-import Motores from './pages/Motores';
-import Relatorios from './pages/Relatorios';
+import Confronto from './pages/Confronto';
+import Pgc from './pages/Pgc';
+import Legislacao from './pages/Legislacao';
+import Definicoes from './pages/Definicoes';
+import AdminGestao from './pages/AdminGestao';
 import { PeriodoProvider } from './context/PeriodoContext';
+import { adminService } from './services/api';
 
 function ProtectedRoute({ children }) {
   const user = localStorage.getItem('user');
@@ -21,10 +22,49 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
-function RootRoute() {
-  const user = localStorage.getItem('user');
-  return user ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />;
+function AdminRoute({ children }) {
+  const userStr = localStorage.getItem('user');
+  if (!userStr) {
+    return <Navigate to="/login" replace />;
+  }
+  try {
+    const user = JSON.parse(userStr);
+    if (user.is_admin || user.is_superuser || user.is_staff) {
+      return children;
+    }
+
+    // Registo de segurança: utilizador cliente de empresa tentou entrar no Admin
+    adminService
+      .registrarTentativa({
+        rota: window.location.pathname || '/admin-gestao',
+        username: user.username || 'Cliente',
+        motivo: 'Tentativa de navegação direta à Área Administrativa por empresa/utilizador cliente.',
+      })
+      .catch(() => {});
+
+    toast.error(
+      'Acesso Restrito: As empresas não têm permissão para aceder à Gestão Global do Administrador. A tentativa foi registada para auditoria de segurança.',
+      { toastId: 'admin-access-denied' }
+    );
+  } catch {
+    // fallback
+  }
+  return <Navigate to="/arquivo" replace />;
 }
+
+function RootRoute() {
+  const userStr = localStorage.getItem('user');
+  if (!userStr) return <Navigate to="/login" replace />;
+  return <Navigate to="/confronto" replace />;
+}
+
+/** Envolve uma página no layout e na guarda de sessão. */
+const Pagina = ({ children }) => (
+  <ProtectedRoute>
+    <MainLayout>{children}</MainLayout>
+  </ProtectedRoute>
+);
+
 
 function App() {
   return (
@@ -44,93 +84,56 @@ function App() {
       <Router>
         <PeriodoProvider>
           <Routes>
-          <Route path="/" element={<RootRoute />} />
-          <Route path="/login" element={<LoginPage onLogin={() => {}} />} />
-          <Route path="/home" element={<Navigate to="/dashboard" replace />} />
-          <Route
-            path="/dashboard"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Dashboard />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/empresas"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Empresas />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route path="/analise" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/historico" element={<Navigate to="/dashboard" replace />} />
-          <Route
-            path="/configuracoes"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Configuracoes />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/perfil"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Configuracoes />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/documentos"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Documentos />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/motores"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Motores />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/motores/:codigo"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Motores />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route path="/reconciliacao" element={<Navigate to="/motores/M1" replace />} />
-          <Route
-            path="/relatorios"
-            element={
-              <ProtectedRoute>
-                <MainLayout>
-                  <Relatorios />
-                </MainLayout>
-              </ProtectedRoute>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="/" element={<RootRoute />} />
+            <Route path="/login" element={<LoginPage onLogin={() => {}} />} />
+
+            {/* Área Administrativa Master Multi-Empresa com Template Próprio */}
+            <Route
+              path="/admin-gestao"
+              element={
+                <ProtectedRoute>
+                  <AdminRoute>
+                    <AdminGestao />
+                  </AdminRoute>
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/admin" element={<Navigate to="/admin-gestao" replace />} />
+
+            {/* Gestão Contabilística & Fiscal */}
+            <Route path="/arquivo" element={<Pagina><Documentos /></Pagina>} />
+            <Route path="/confronto" element={<Pagina><Confronto /></Pagina>} />
+            <Route path="/pgc" element={<Pagina><Pgc /></Pagina>} />
+            <Route path="/legislacao" element={<Pagina><Legislacao /></Pagina>} />
+            <Route path="/definicoes" element={<Pagina><Definicoes /></Pagina>} />
+
+            {/* Redirecionamentos de rotas e aliases */}
+            <Route path="/reconciliacao" element={<Navigate to="/confronto" replace />} />
+            <Route path="/analise" element={<Navigate to="/confronto" replace />} />
+            <Route path="/historico" element={<Navigate to="/confronto" replace />} />
+            <Route path="/diario" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/razao" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/balancete" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/balancetes" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/lancamentos" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/auditoria" element={<Navigate to="/confronto" replace />} />
+            <Route path="/relatorio" element={<Navigate to="/confronto" replace />} />
+            <Route path="/relatorios" element={<Navigate to="/confronto" replace />} />
+            <Route path="/fiscal" element={<Navigate to="/legislacao" replace />} />
+            <Route path="/codigos-fiscais" element={<Navigate to="/legislacao" replace />} />
+            <Route path="/plano-contas" element={<Navigate to="/pgc" replace />} />
+            <Route path="/plano" element={<Navigate to="/pgc" replace />} />
+            <Route path="/dashboard" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/home" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/motores" element={<Navigate to="/confronto" replace />} />
+            <Route path="/motores/:codigo" element={<Navigate to="/confronto" replace />} />
+            <Route path="/auditoria-periodo" element={<Navigate to="/confronto" replace />} />
+            <Route path="/documentos" element={<Navigate to="/arquivo" replace />} />
+            <Route path="/empresas" element={<Navigate to="/definicoes" replace />} />
+            <Route path="/configuracoes" element={<Navigate to="/definicoes" replace />} />
+            <Route path="/perfil" element={<Navigate to="/definicoes" replace />} />
+
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </PeriodoProvider>
       </Router>

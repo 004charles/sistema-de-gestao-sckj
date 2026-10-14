@@ -14,6 +14,7 @@ import operator
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from . import taxas
 from .models import (
     Contabilidade, DeclaracaoAGT, DocumentoUpload, Ocorrencia, Reconciliacao,
     Regra,
@@ -30,6 +31,41 @@ _OPERADORES_BIN = {
     ast.Div: operator.truediv, ast.Mod: operator.mod,
 }
 _OPERADORES_UN = {ast.USub: operator.neg, ast.UAdd: operator.pos}
+# Contas do PGC cujas despesas estão excluídas do direito à dedução do IVA
+# (art. 21.º do CIVA — combustíveis, viaturas de turismo, deslocações e
+# estadas, representação). Sem isto, o sistema acusava de "IVA não deduzido"
+# o tratamento que a lei exige, e deixava passar deduções indevidas.
+# Carece de validação jurídica, como qualquer outra matéria legal do sistema.
+CONTAS_SEM_DIREITO_DEDUCAO = ('75213', '75233', '75235', '75236')
+
+# Regras silenciadas: todas disparam apenas por *ausência de documento*, não
+# por um erro nos números. Essa informação passou a ser dada onde faz sentido
+# — a cobertura documental diz o que falta carregar, e o calendário fiscal diz
+# o que falta entregar — pelo que repeti-la aqui como "achado de auditoria"
+# só produzia ruído e escondia os erros verdadeiros.
+#
+# Esta lista é exposta na API (`/regras/?silenciadas=1`): o utilizador tem o
+# direito de saber que verificações não estão a correr, e porquê.
+REGRAS_SILENCIADAS = {
+    'BANCO-001': 'Exige extracto bancário; a falta é reportada na cobertura.',
+    'FAC-001': 'Exige facturas de venda; a falta é reportada na cobertura.',
+    'FAC-002': 'Exige ficheiro SAF-T (AO); ainda não suportado.',
+    'HIST-001': 'Exige períodos anteriores carregados.',
+    'HIST-002': 'Exige períodos anteriores carregados.',
+    'II-001': 'Exige declaração de Imposto Industrial; a falta vai na cobertura.',
+    'IRT-002': 'Exige declaração de IRT; a falta vai no calendário fiscal.',
+    'IRT-003': 'Exige folha salarial para apurar a base do IRT.',
+    'PRAZO-001': 'Condição idêntica à IVA-001, e o calendário fiscal já dá a\n                 data-limite real da entrega.',
+    'PRAZO-002': 'Substituída pelo calendário fiscal, que calcula datas reais.',
+    'REL-001': 'Pertence ao relatório, não é um achado.',
+    'REL-002': 'Pertence ao relatório, não é um achado.',
+    'RET-002': 'Exige comprovativos; a falta vai no calendário fiscal.',
+    'SEL-001': 'Exige facturas de compra; a falta vai na cobertura.',
+    'SS-001': 'Exige folha da Segurança Social; a falta vai no calendário fiscal.',
+    'IVA-005': 'Duplica IVA-004 sobre os mesmos campos.',
+}
+REGRAS_IGNORAR_FALTA_DOC = frozenset(REGRAS_SILENCIADAS)
+
 _OPERADORES_CMP = {
     ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
     ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
@@ -151,6 +187,26 @@ def construir_contexto(empresa, ano, mes):
     tem_doc_balancete = any(d.tipo == 'BALANCETE' for d in documentos)
     tem_doc_modelo7 = any(d.tipo == 'MODELO7' for d in documentos)
 
+    # Um balancete só pode ser declarado desequilibrado quando temos de
+    # facto um balancete. O processamento de dossiês já gravou no passado
+    # extractos parciais, e compará-los como se fossem a contabilidade
+    # inteira produzia diferenças de milhões em empresas correctas.
+    from . import balancete as _balancete
+    _raizes = _balancete.contas_raiz([
+        {'codigo': l.conta_codigo.replace('.', '').strip(),
+         'mov_debito': l.valor_debito, 'mov_credito': l.valor_credito}
+        for l in linhas
+    ])
+    balancete_completo = 1 if len(_raizes) >= 2 else 0
+    total_debito_raiz = sum((r['mov_debito'] for r in _raizes), Decimal('0'))
+    total_credito_raiz = sum((r['mov_credito'] for r in _raizes), Decimal('0'))
+    diferenca_balanceamento = (
+        abs(total_debito_raiz - total_credito_raiz) if balancete_completo else Decimal('0')
+    )
+    balancete_desequilibrado = 1 if (
+        balancete_completo and diferenca_balanceamento > Decimal('0.01')
+    ) else 0
+
     iva_coerente = 1 if abs(
         (iva_liquidado - iva_dedutivel) - iva_apurado
     ) <= Decimal('0.01') else 0
@@ -172,6 +228,7 @@ def construir_contexto(empresa, ano, mes):
     clientes_saldo_credor = Decimal('0')
     fornecimentos_terceiros = Decimal('0')
     multas_encargos_contab = Decimal('0')
+    despesas_sem_direito_deducao = Decimal('0')
 
     for l in linhas:
         codigo = l.conta_codigo.replace('.', '').strip()
@@ -208,6 +265,8 @@ def construir_contexto(empresa, ano, mes):
             honorarios_prestadores += debito
         elif codigo.startswith('752'):
             fornecimentos_terceiros += debito
+            if codigo.startswith(CONTAS_SEM_DIREITO_DEDUCAO):
+                despesas_sem_direito_deducao += debito
         elif codigo.startswith(('756', '757')):
             multas_encargos_contab += debito
         elif codigo.startswith('3451'):
@@ -234,7 +293,12 @@ def construir_contexto(empresa, ano, mes):
         iva_custo_contab = dados_bal['iva_custo']
 
     # Se não temos DeclaracaoAGT no banco mas temos MODELO7 nos documentos
+    # Base presumida a partir da taxa geral, para quem não carregou o Modelo 7.
+    # `base_declarada_real` fica a 0 porque este valor não é observado: foi
+    # obtido a dividir por 14%, e por isso NÃO serve para verificar a taxa
+    # (dividir de novo devolveria sempre 14%, qualquer que fosse o imposto).
     volume_negocios_declarado = iva_liquidado / Decimal('0.14') if iva_liquidado > 0 else Decimal('0')
+    base_declarada_real = Decimal('0')
     doc_m7 = next((d for d in documentos if d.tipo == 'MODELO7'), None)
     if not declaracao and doc_m7 and doc_m7.texto_extraido:
         from . import pdf_service
@@ -248,6 +312,58 @@ def construir_contexto(empresa, ano, mes):
             iva_pagar = dados_m7['iva_pagar']
         if dados_m7['base_tributavel'] > Decimal('0'):
             volume_negocios_declarado = dados_m7['base_tributavel']
+            base_declarada_real = dados_m7['base_tributavel']  # campo 31, observado
+
+    # --- Taxas e regime (§12) -------------------------------------------
+    # O sistema lê os campos das taxas do Modelo 7 desde que passou a
+    # interpretar o formulário inteiro, mas até agora nunca verificava se a
+    # taxa aplicada era uma das taxas legais.
+    # Só se verifica a taxa contra uma base efectivamente observada: o campo
+    # 31 do Modelo 7 ou, na sua falta, o volume de negócios do balancete.
+    base_para_taxa = base_declarada_real or volume_negocios_contab
+    # E só quando existe declaração. Sem Modelo 7 o imposto liquidado é zero,
+    # o que daria "taxa de 0%" e um alerta de taxa errada em cima de um
+    # período cujo verdadeiro problema é não haver declaração nenhuma — que
+    # já é dito, uma vez, pela IVA-001.
+    ha_declaracao = bool(tem_modelo7 or tem_doc_modelo7)
+    taxa_iva_implicita = (
+        taxas.taxa_implicita(base_para_taxa, iva_liquidado)
+        if (base_para_taxa > 0 and ha_declaracao) else None
+    )
+    taxa_classificada = taxas.classificar_taxa(taxa_iva_implicita)
+    taxa_iva_reconhecida = 1 if taxa_classificada else 0
+    taxa_iva_desconhecida = 1 if (
+        taxa_iva_implicita is not None and not taxa_classificada
+    ) else 0
+    taxa_iva_valor = (
+        (taxa_iva_implicita * Decimal('100')).quantize(Decimal('0.01'))
+        if taxa_iva_implicita is not None else Decimal('0')
+    )
+
+    caracteristicas = taxas.CARACTERISTICAS_REGIME.get(empresa.regime_iva, {})
+    taxa_do_regime = caracteristicas.get('taxa')
+    taxa_diverge_do_regime = 1 if (
+        taxa_do_regime is not None
+        and taxa_iva_implicita is not None
+        and abs(taxa_iva_implicita - taxa_do_regime) > taxas.TOLERANCIA_TAXA
+    ) else 0
+    # Quanto o IVA liquidado difere do que a taxa do regime produziria.
+    diferenca_taxa_regime = (
+        abs(iva_liquidado - (base_para_taxa * taxa_do_regime))
+        .quantize(Decimal('0.01'))
+        if (taxa_do_regime is not None and base_para_taxa > 0
+            and taxa_diverge_do_regime) else Decimal('0')
+    )
+
+    # Regime declarado vs regime que o volume de negócios impõe.
+    regime_esperado = taxas.regime_por_volume(empresa.volume_negocios_anual)
+    regime_divergente = 1 if (
+        regime_esperado and regime_esperado != empresa.regime_iva
+    ) else 0
+    sem_obrigacoes_iva = 0 if caracteristicas.get('tem_obrigacoes_iva', True) else 1
+    liquidou_iva_sem_obrigacao = 1 if (
+        sem_obrigacoes_iva and iva_liquidado > Decimal('0')
+    ) else 0
 
     # Presença de documentos específicos
     tem_doc_folha = 1 if any(d.tipo == 'FOLHA_SALARIAL' for d in documentos) else 0
@@ -266,12 +382,50 @@ def construir_contexto(empresa, ano, mes):
     diferenca_retencao_honorarios = abs(retencao_devida_estimada - retencao_prestadores_contab) if honorarios_prestadores > 0 else Decimal('0')
 
     diferenca_iva_suportado_agt = abs(iva_suportado_contab - iva_dedutivel) if iva_suportado_contab > Decimal('0') else Decimal('0')
-    divergencia_suportado_dedutivel = 1 if (iva_suportado_contab > Decimal('0') and iva_dedutivel == Decimal('0')) else 0
+    # IVA suportado e não deduzido só é anomalia se não houver despesas
+    # legalmente excluídas do direito à dedução que o expliquem (art. 21.º).
+    tem_despesas_excluidas = 1 if despesas_sem_direito_deducao > Decimal('0') else 0
+    divergencia_suportado_dedutivel = 1 if (
+        iva_suportado_contab > Decimal('0')
+        and iva_dedutivel == Decimal('0')
+        and not tem_despesas_excluidas
+    ) else 0
     divergencia_volume_negocios = 1 if (volume_negocios_contab > Decimal('0') and volume_negocios_declarado > Decimal('0') and abs(volume_negocios_contab - volume_negocios_declarado) > Decimal('1.00')) else 0
+
+    # Segurança Social: a taxa de 8% não incide sobre a conta 722 inteira.
+    # Subsídios de alimentação, transporte e abonos dentro dos limites legais
+    # estão excluídos da base de incidência (Decreto Presidencial n.º 227/18),
+    # pelo que comparar `722 x 8%` com a conta 725 acusa empresas correctas.
+    #
+    # O teste fiável é a coerência interna da relação legal 8% + 3% = 11%:
+    # a base implícita sai dos encargos patronais efectivamente contabilizados
+    # e o total entregue ao INSS (conta 3492) tem de corresponder a 11% dessa
+    # mesma base. Quando bate, a contabilidade está certa, seja qual for o
+    # peso dos subsídios isentos.
+    base_inss_implicita = (
+        (encargos_patronais / Decimal('0.08')).quantize(Decimal('0.01'))
+        if encargos_patronais > 0 else Decimal('0')
+    )
+    inss_esperado_total = (base_inss_implicita * Decimal('0.11')).quantize(Decimal('0.01'))
+    tem_dados_ss = 1 if (encargos_patronais > 0 and inss_contabilizado > 0) else 0
+    desvio_inss_total = (
+        abs(inss_contabilizado - inss_esperado_total) if tem_dados_ss else Decimal('0')
+    )
+    inss_coerente = 1 if (tem_dados_ss and desvio_inss_total <= Decimal('1.00')) else 0
+    inss_incoerente = 1 if (tem_dados_ss and desvio_inss_total > Decimal('1.00')) else 0
+
+    # Base excluída: informativo, para o utilizador perceber de onde vem a
+    # diferença face à massa salarial bruta. Não gera alerta por si só.
+    remuneracoes_excluidas_ss = (
+        max(remuneracoes_total - base_inss_implicita, Decimal('0'))
+        if (remuneracoes_total > 0 and base_inss_implicita > 0) else Decimal('0')
+    )
 
     encargos_esperados_ss = (remuneracoes_total * Decimal('0.08')).quantize(Decimal('0.01'))
     desvio_encargos_ss = abs(encargos_patronais - encargos_esperados_ss) if (remuneracoes_total > 0 and encargos_patronais > 0) else Decimal('0')
-    desvio_encargos_anormal = 1 if desvio_encargos_ss > Decimal('1000.00') else 0
+    # Mantido só por compatibilidade com regras antigas; o teste activo é
+    # `inss_incoerente`. Nunca dispara sozinho.
+    desvio_encargos_anormal = 0
 
     exposicao_total_potencial = (
         diferenca_retencao_honorarios +
@@ -296,6 +450,11 @@ def construir_contexto(empresa, ano, mes):
         'iva_coerente': iva_coerente,
         'reconciliacao_divergencias': reconciliacao_divergencias,
         'diferenca_devedor_credor': abs(soma_devedor - soma_credor),
+        'balancete_completo': balancete_completo,
+        'balancete_desequilibrado': balancete_desequilibrado,
+        'diferenca_balanceamento': diferenca_balanceamento,
+        'total_debito_raiz': total_debito_raiz,
+        'total_credito_raiz': total_credito_raiz,
 
         # Campos PGC e cruzamentos fiscais
         'caixa_saldo_credor': caixa_saldo_credor,
@@ -314,6 +473,14 @@ def construir_contexto(empresa, ano, mes):
         'encargos_esperados_ss': encargos_esperados_ss,
         'desvio_encargos_ss': desvio_encargos_ss,
         'desvio_encargos_anormal': desvio_encargos_anormal,
+        'despesas_sem_direito_deducao': despesas_sem_direito_deducao,
+        'tem_despesas_excluidas': tem_despesas_excluidas,
+        'base_inss_implicita': base_inss_implicita,
+        'inss_esperado_total': inss_esperado_total,
+        'desvio_inss_total': desvio_inss_total,
+        'inss_coerente': inss_coerente,
+        'inss_incoerente': inss_incoerente,
+        'remuneracoes_excluidas_ss': remuneracoes_excluidas_ss,
         'honorarios_prestadores': honorarios_prestadores,
         'iva_suportado_contab': iva_suportado_contab,
         'iva_custo_contab': iva_custo_contab,
@@ -338,6 +505,18 @@ def construir_contexto(empresa, ano, mes):
         'tem_doc_declaracao_irt': tem_doc_declaracao_irt,
         'tem_doc_folha_ss': tem_doc_folha_ss,
         'tem_doc_imposto_industrial': tem_doc_imposto_industrial,
+
+        # Taxas e regime
+        'taxa_iva_valor': taxa_iva_valor,
+        'base_para_taxa': base_para_taxa,
+        'taxa_iva_reconhecida': taxa_iva_reconhecida,
+        'taxa_iva_desconhecida': taxa_iva_desconhecida,
+        'taxa_diverge_do_regime': taxa_diverge_do_regime,
+        'diferenca_taxa_regime': diferenca_taxa_regime,
+        'regime_divergente': regime_divergente,
+        'sem_obrigacoes_iva': sem_obrigacoes_iva,
+        'liquidou_iva_sem_obrigacao': liquidou_iva_sem_obrigacao,
+        'volume_negocios_anual': Decimal(str(empresa.volume_negocios_anual or 0)),
     }
 
     fontes = []
@@ -388,11 +567,6 @@ def executar(empresa, ano, mes):
     actualizadas = 0
     avaliadas = 0
     erros = []
-    REGRAS_IGNORAR_FALTA_DOC = {
-        'BANCO-001', 'FAC-001', 'FAC-002', 'HIST-001', 'HIST-002',
-        'II-001', 'IRT-002', 'IRT-003', 'PRAZO-002', 'REL-001',
-        'REL-002', 'RET-002', 'SEL-001', 'SS-001', 'IVA-005'
-    }
 
     for regra in regras:
         if regra.codigo in REGRAS_IGNORAR_FALTA_DOC:
@@ -464,3 +638,24 @@ def executar(empresa, ano, mes):
         'ocorrencias_actualizadas': actualizadas,
         'erros': erros,
     }
+
+
+def contar_avaliaveis(empresa, ano, mes):
+    """Quantas verificações correm realmente neste período.
+
+    É o denominador do contador "OK" que a empresa vê: de nada serve dizer
+    "9 verificações passaram" se o sistema só avaliou 3. Conta apenas as
+    regras validadas, activas, cuja base legal está em vigor no período e
+    que não estão silenciadas.
+    """
+    total = 0
+    regras = Regra.objects.filter(
+        activa=True, estado_validacao='VALIDADA'
+    ).select_related('base_legal')
+    for regra in regras:
+        if regra.codigo in REGRAS_IGNORAR_FALTA_DOC:
+            continue
+        if not _vigencia_cobre(regra.base_legal, ano, mes):
+            continue
+        total += 1
+    return total

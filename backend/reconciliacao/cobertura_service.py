@@ -12,6 +12,11 @@ Regras (Regra de Ouro do plano):
 from .models import DocumentoUpload, Motor, PerfilFiscal
 from .motores_seed import DISCLAIMER_COBERTURA
 
+# Documentos que só existem onde existe a obrigação correspondente. Pedir um
+# Modelo 7 a uma empresa do regime de exclusão seria contar como "em falta"
+# um documento que a lei não a obriga a ter.
+DOCUMENTOS_SO_COM_IVA = ('MODELO7',)
+
 ESTADOS_CONTAM = ('VALIDADO', 'UTILIZADO')
 
 
@@ -58,8 +63,13 @@ def calcular(empresa, ano, mes):
     total_disponiveis = 0
     sem_matriz = []
 
+    tem_iva = getattr(empresa, 'tem_obrigacoes_iva', True)
+
     for motor in motores:
-        requeridos = list(motor.documentos_requeridos.all())
+        requeridos = [
+            r for r in motor.documentos_requeridos.all()
+            if tem_iva or r.tipo_documento not in DOCUMENTOS_SO_COM_IVA
+        ]
         if not requeridos:
             sem_matriz.append({'codigo': motor.codigo, 'nome': motor.nome})
             por_motor.append({

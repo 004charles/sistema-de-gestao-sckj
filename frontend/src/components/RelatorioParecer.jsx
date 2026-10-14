@@ -168,8 +168,58 @@ const RelatorioParecer = ({ dados, empresaAtual, ano, mes }) => {
               </div>
             </div>
           </div>
-        </div>
       </div>
+
+      {/* DEMONSTRAÇÃO DO APURAMENTO DO IVA (LEI N.º 7/19 - CIVA) */}
+      {analiseIAEstruturada?.apuramentoIva && (
+        <div className="mb-25 p-15" style={{ ...boxNeutro, border: '2px solid #5f63f2', background: '#fafbff' }}>
+          <div className="d-flex justify-content-between align-items-center mb-10 flex-wrap" style={{ gap: 8 }}>
+            <div>
+              <strong className="color-dark d-block" style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+                ⚖️ Quadro Oficial de Apuramento do IVA (Lei n.º 7/19 — CIVA)
+              </strong>
+              <span className="text-muted" style={{ fontSize: 11.5 }}>
+                Fórmula Legal Obrigatória: <strong>IVA a Pagar = IVA Liquidado (Vendas) − IVA Dedutível (Compras)</strong>
+              </span>
+            </div>
+            <span className="badge badge-primary px-8 py-3" style={{ fontSize: 10.5, fontWeight: 700 }}>
+              Art. 19.º CIVA
+            </span>
+          </div>
+
+          <div className="row" style={{ rowGap: 10 }}>
+            <div className="col-12 col-md-4">
+              <div className="p-10 rounded bg-white" style={{ border: '1px solid #adc6ff' }}>
+                <span className="d-block fw-700" style={{ fontSize: 11, color: '#1d39c4' }}>
+                  (+) 1. IVA LIQUIDADO
+                </span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Contabilidade (Conta 3453): <strong>{analiseIAEstruturada.apuramentoIva.liquidado.contabilidade}</strong></span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Modelo 7 (Campo 21): <strong>{analiseIAEstruturada.apuramentoIva.liquidado.agt}</strong></span>
+              </div>
+            </div>
+
+            <div className="col-12 col-md-4">
+              <div className="p-10 rounded bg-white" style={{ border: '1px solid #ffd591' }}>
+                <span className="d-block fw-700" style={{ fontSize: 11, color: '#d46b08' }}>
+                  (−) 2. IVA DEDUTÍVEL
+                </span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Contabilidade (Conta 3451): <strong>{analiseIAEstruturada.apuramentoIva.dedutivel.contabilidade}</strong></span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Modelo 7 (Campo 22): <strong>{analiseIAEstruturada.apuramentoIva.dedutivel.agt}</strong></span>
+              </div>
+            </div>
+
+            <div className="col-12 col-md-4">
+              <div className="p-10 rounded bg-white" style={{ border: '2px solid #5f63f2' }}>
+                <span className="d-block fw-700" style={{ fontSize: 11, color: '#5f63f2' }}>
+                  (=) 3. IVA A PAGAR (APURAMENTO)
+                </span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Contabilidade: <strong>{analiseIAEstruturada.apuramentoIva.pagar.contabilidade}</strong></span>
+                <span className="text-muted d-block" style={{ fontSize: 10.5 }}>Modelo 7 (Campo 27): <strong>{analiseIAEstruturada.apuramentoIva.pagar.agt}</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 2. QUADRO DE CONFRONTO DIRETO DOS DADOS */}
       <div className="mb-25">
@@ -271,7 +321,7 @@ const RelatorioParecer = ({ dados, empresaAtual, ano, mes }) => {
           </div>
         ) : (
           <>
-            {analiseIAEstruturada?.diferencasDetalhadas && analiseIAEstruturada.diferencasDetalhadas.length > 0 &&
+            {analiseIAEstruturada?.diferencasDetalhadas && analiseIAEstruturada.diferencasDetalhadas.length > 0 ? (
               analiseIAEstruturada.diferencasDetalhadas.map((dif, idx) => (
                 <div
                   key={idx}
@@ -323,7 +373,27 @@ const RelatorioParecer = ({ dados, empresaAtual, ano, mes }) => {
                     </div>
                   )}
                 </div>
-              ))}
+              ))
+            ) : (
+              <div
+                className="p-15 mb-15"
+                style={{
+                  backgroundColor: '#f6fbf9',
+                  border: '1px solid #c8eedf',
+                  borderRadius: 8,
+                }}
+              >
+                <div className="fw-700 color-success fs-13 mb-4">
+                  ✓ {t('officialReport.allCompliant', 'Sem divergências fiscais detetadas')}
+                </div>
+                <div className="fs-12 text-muted">
+                  {t(
+                    'officialReport.allCompliantDesc',
+                    'Todos os valores declarados no Modelo 7 da AGT coincidem com os registos apurados no Balancete de Verificação da Contabilidade.'
+                  )}
+                </div>
+              </div>
+            )}
 
             {analiseIAEstruturada?.pontosIguais && analiseIAEstruturada.pontosIguais.length > 0 && (
               <div className="p-12" style={{ backgroundColor: '#f6fbf9', border: '1px solid #c8eedf', borderRadius: 8 }}>

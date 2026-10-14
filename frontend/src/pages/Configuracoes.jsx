@@ -1,18 +1,24 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
 import api from '../services/api';
 import { usePeriodo } from '../context/PeriodoContext';
+import Taxas from '../components/definicoes/Taxas';
 
 const BADGE_REGIME = {
-  Geral: 'badge-primary',
-  Simplificado: 'badge-info',
-  Isenção: 'badge-secondary',
+  GERAL: 'badge-primary',
+  SIMPLIFICADO: 'badge-info',
+  EXCLUSAO: 'badge-secondary',
 };
 
 const Configuracoes = () => {
+  const navigate = useNavigate();
   const { t } = useTranslation();
   const { empresaId, atualizar } = usePeriodo();
+
+  const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = Boolean(currentUser.is_admin || currentUser.is_superuser || currentUser.is_staff);
 
   const [abaAtiva, setAbaAtiva] = useState('empresa'); // 'empresa' | 'perfil' | 'parametros'
   const [empresas, setEmpresas] = useState([]);
@@ -116,121 +122,250 @@ const Configuracoes = () => {
     <>
       <style>
         {`
-        .config-tab-btn {
-          border: none;
-          background: transparent;
-          font-weight: 600;
-          font-size: 13.5px;
-          padding: 10px 20px;
+        .step-pill {
+          padding: 8px 16px;
           border-radius: 8px;
-          color: #5a5f7d;
-          transition: all 0.2s ease;
+          background: #f4f6f9;
+          font-weight: 700;
+          font-size: 12.5px;
+          color: #495057;
           display: inline-flex;
           align-items: center;
-          gap: 6px;
+          gap: 8px;
+          cursor: pointer;
+          border: 1px solid transparent;
+          transition: all 0.2s ease;
         }
-        .config-tab-btn:hover {
-          background: #edf0f5;
-          color: #272b41;
+        .step-pill:hover {
+          background: #eaedf2;
+          color: #1a3353;
         }
-        .config-tab-btn.active {
-          background: #5f63f2;
-          color: #ffffff;
-          box-shadow: 0 3px 8px rgba(95, 99, 242, 0.25);
+        .step-pill.active {
+          background: #e8ebfc;
+          color: #1a3353;
+          border: 1px solid #c2c9f5;
         }
-        .config-card {
+        .confronto-kpi-card {
           border: 1px solid #edf0f5;
           border-radius: 10px;
-          background: #fff;
+          background: #ffffff;
+          padding: 18px 20px;
+          transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .confronto-kpi-card:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 6px 16px rgba(0,0,0,0.06);
         }
         `}
       </style>
 
-      {/* CABEÇALHO */}
+      {/* CABEÇALHO DA PÁGINA (ESTILO CONFRONTO) */}
       <div className="row mb-20">
         <div className="col-12">
           <div className="d-flex justify-content-between align-items-center flex-wrap" style={{ gap: 12 }}>
             <div>
-              <h4 className="fw-700 color-dark mb-4" style={{ fontSize: 20 }}>
+              <h4 className="fw-800 color-dark mb-4" style={{ fontSize: 22, color: '#1a3353' }}>
                 <i className="la la-cog text-primary mr-6"></i>{' '}
-                {t('configuracoes.title', 'Configurações do Sistema')}
+                {t('configuracoes.title', 'Definições da Empresa & Configurações')}
               </h4>
-              <p className="text-muted mb-0" style={{ fontSize: 13 }}>
-                {t(
-                  'configuracoes.subtitle',
-                  'Gestão cadastral da empresa auditada, credenciais de acesso e parâmetros oficiais da AGT.'
-                )}
+              <p className="text-muted mb-0" style={{ fontSize: 13.5 }}>
+                Gestão cadastral da empresa auditada, credenciais de acesso e parâmetros oficiais da AGT.
               </p>
+            </div>
+
+            {isAdmin && (
+              <button
+                type="button"
+                className="btn btn-sm btn-primary d-flex align-items-center"
+                onClick={() => navigate('/admin-gestao')}
+                style={{
+                  borderRadius: 8,
+                  fontWeight: 700,
+                  fontSize: 13,
+                  backgroundColor: '#5f63f2',
+                  borderColor: '#5f63f2',
+                  padding: '8px 16px',
+                }}
+              >
+                <i className="la la-shield-alt mr-2" style={{ fontSize: 16 }}></i>
+                {t('navigation.admin', 'Painel de Administração')}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* FAIXA DE RESUMO DA EMPRESA */}
+      <div className="card card-default mb-20" style={{ border: '1px solid #edf0f5', borderRadius: 10, background: '#fff' }}>
+        <div className="card-body p-16">
+          <div className="d-flex align-items-center justify-content-between flex-wrap" style={{ gap: 12 }}>
+            <div className="d-flex align-items-center" style={{ gap: 12 }}>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 8,
+                  backgroundColor: '#5f63f2',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: 20,
+                }}
+              >
+                {empresaSelecionada?.nome ? empresaSelecionada.nome.charAt(0).toUpperCase() : 'E'}
+              </div>
+              <div>
+                <strong className="color-dark d-block" style={{ fontSize: 14 }}>
+                  {empresaSelecionada?.nome || 'Selecione a Empresa'}
+                </strong>
+                <span className="text-muted" style={{ fontSize: 12 }}>
+                  NIF: {empresaSelecionada?.nif || '---'} · Regime de IVA: {empresaSelecionada?.regime_nome || empresaSelecionada?.regime_iva || 'Geral'}
+                </span>
+              </div>
+            </div>
+
+            <div className="d-flex align-items-center" style={{ gap: 10 }}>
+              <select
+                className="form-control form-control-sm"
+                value={empresaId}
+                onChange={(e) => atualizar({ empresaId: e.target.value })}
+                style={{ minWidth: 240, height: 38, fontWeight: 600, fontSize: 13 }}
+              >
+                {empresas.length === 0 ? (
+                  <option value="">Nenhuma empresa cadastrada</option>
+                ) : (
+                  empresas.map((emp) => (
+                    <option key={emp.id} value={String(emp.id)}>
+                      {emp.nome} ({emp.nif})
+                    </option>
+                  ))
+                )}
+              </select>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary d-flex align-items-center"
+                onClick={() => navigate('/admin-gestao?aba=empresas&novaEmpresa=1')}
+                style={{
+                  height: 38,
+                  borderRadius: 8,
+                  fontWeight: 700,
+                  backgroundColor: '#5f63f2',
+                  borderColor: '#5f63f2',
+                  padding: '0 14px',
+                  gap: 6,
+                  whiteSpace: 'nowrap',
+                  fontSize: 13,
+                }}
+                title="Cadastrar Nova Empresa"
+              >
+                <i className="la la-plus" style={{ fontSize: 15 }}></i>
+                <span>Nova Empresa</span>
+              </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* NAVEGAÇÃO DE ABAS */}
-      <div className="row mb-20">
-        <div className="col-12">
-          <div
-            className="d-flex flex-wrap align-items-center p-6"
-            style={{ background: '#f4f5f7', borderRadius: 10, gap: 6 }}
-          >
-            <button
-              type="button"
-              className={`config-tab-btn ${abaAtiva === 'empresa' ? 'active' : ''}`}
-              onClick={() => setAbaAtiva('empresa')}
-            >
-              <i className="la la-building"></i> {t('configuracoes.tabs.company', '1. Dados da Empresa')}
-            </button>
-            <button
-              type="button"
-              className={`config-tab-btn ${abaAtiva === 'perfil' ? 'active' : ''}`}
-              onClick={() => setAbaAtiva('perfil')}
-            >
-              <i className="la la-user-circle"></i>{' '}
-              {t('configuracoes.tabs.profile', '2. O Meu Perfil & Credenciais')}
-            </button>
-            <button
-              type="button"
-              className={`config-tab-btn ${abaAtiva === 'parametros' ? 'active' : ''}`}
-              onClick={() => setAbaAtiva('parametros')}
-            >
-              <i className="la la-balance-scale"></i>{' '}
-              {t('configuracoes.tabs.params', '3. Parâmetros Fiscais (AGT)')}
-            </button>
+      {/* 4 CARDS KPIS NO FORMATO DO CONFRONTO */}
+      <div className="row mb-20" style={{ rowGap: 12 }}>
+        <div className="col-12 col-sm-6 col-lg-3">
+          <div className="confronto-kpi-card h-100" style={{ borderTop: '3px solid #5f63f2' }}>
+            <span className="text-muted fw-700 d-block mb-4" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              NIF da Empresa
+            </span>
+            <div className="fw-800 color-dark" style={{ fontSize: 22 }}>
+              {empresaSelecionada?.nif || '---'}
+            </div>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              Contribuinte Fiscal AGT
+            </span>
           </div>
         </div>
+
+        <div className="col-12 col-sm-6 col-lg-3">
+          <div className="confronto-kpi-card h-100" style={{ borderTop: '3px solid #52c41a' }}>
+            <span className="text-muted fw-700 d-block mb-4" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Regime de IVA
+            </span>
+            <div className="fw-800" style={{ fontSize: 22, color: '#52c41a' }}>
+              {empresaSelecionada?.regime_iva || 'GERAL'}
+            </div>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              Taxa Geral 14%
+            </span>
+          </div>
+        </div>
+
+        <div className="col-12 col-sm-6 col-lg-3">
+          <div className="confronto-kpi-card h-100" style={{ borderTop: '3px solid #1890ff' }}>
+            <span className="text-muted fw-700 d-block mb-4" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Localização
+            </span>
+            <div className="fw-800" style={{ fontSize: 22, color: '#1890ff' }}>
+              {empresaSelecionada?.provincia || 'Luanda'}
+            </div>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              Município de {empresaSelecionada?.municipio || 'Luanda'}
+            </span>
+          </div>
+        </div>
+
+        <div className="col-12 col-sm-6 col-lg-3">
+          <div className="confronto-kpi-card h-100" style={{ borderTop: '3px solid #fa8b0c' }}>
+            <span className="text-muted fw-700 d-block mb-4" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Atividade Económica
+            </span>
+            <div className="fw-800 text-truncate" style={{ fontSize: 16, color: '#fa8b0c', marginTop: 6 }} title={empresaSelecionada?.atividade_principal}>
+              CAE {empresaSelecionada?.cae_principal || '46900'}
+            </div>
+            <span className="text-muted text-truncate d-block" style={{ fontSize: 12 }}>
+              {empresaSelecionada?.tipo_entidade_display || 'Sociedade por Quotas'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* SELEÇÃO DE ABAS (ESTILO STEP-PILL DO CONFRONTO) */}
+      <div className="d-flex align-items-center mb-20 flex-wrap" style={{ gap: 8 }}>
+        <button
+          type="button"
+          className={`step-pill ${abaAtiva === 'empresa' ? 'active' : ''}`}
+          onClick={() => setAbaAtiva('empresa')}
+        >
+          <i className="la la-building"></i> 1. Dados da Empresa
+        </button>
+        <button
+          type="button"
+          className={`step-pill ${abaAtiva === 'perfil' ? 'active' : ''}`}
+          onClick={() => setAbaAtiva('perfil')}
+        >
+          <i className="la la-user-circle"></i> 2. O Meu Perfil & Credenciais
+        </button>
+        <button
+          type="button"
+          className={`step-pill ${abaAtiva === 'parametros' ? 'active' : ''}`}
+          onClick={() => setAbaAtiva('parametros')}
+        >
+          <i className="la la-balance-scale"></i> 3. Parâmetros Fiscais (AGT)
+        </button>
       </div>
 
       {/* ABA 1: DADOS DA EMPRESA */}
       {abaAtiva === 'empresa' && (
         <div className="row">
           <div className="col-12 col-lg-4 mb-20">
-            {/* Seletor de Empresa */}
-            <div className="card config-card mb-20">
-              <div className="card-header py-12 px-20 border-bottom">
-                <span className="fw-700 color-dark" style={{ fontSize: 13.5 }}>
-                  {t('configuracoes.companyTab.companyInConsultation', 'Empresa em Consulta')}
+            <div className="card card-default mb-20" style={{ border: '1px solid #edf0f5', borderRadius: 10 }}>
+              <div className="card-header bg-white py-14 px-20 border-bottom">
+                <span className="fw-700 color-dark" style={{ fontSize: 14 }}>
+                  Empresa em Consulta
                 </span>
               </div>
               <div className="card-body p-20">
-                <label className="fw-600 text-muted mb-6" style={{ fontSize: 11.5 }}>
-                  {t('configuracoes.companyTab.selectCompany', 'SELECIONE A EMPRESA')}
-                </label>
-                <select
-                  className="form-control form-control-default"
-                  value={empresaId}
-                  onChange={(e) => atualizar({ empresaId: e.target.value })}
-                  style={{ height: 42, fontSize: 13, fontWeight: 500 }}
-                >
-                  {empresas.map((emp) => (
-                    <option key={emp.id} value={String(emp.id)}>
-                      {emp.nome} (NIF: {emp.nif})
-                    </option>
-                  ))}
-                </select>
-
-                {empresaSelecionada && (
-                  <div className="mt-20 p-15 rounded" style={{ background: '#f8f9fb', border: '1px solid #eef0f3' }}>
-                    <div className="d-flex align-items-center mb-10" style={{ gap: 10 }}>
+                {empresaSelecionada ? (
+                  <div className="p-16 rounded" style={{ background: '#f8f9fb', border: '1px solid #eef0f3' }}>
+                    <div className="d-flex align-items-center mb-12" style={{ gap: 10 }}>
                       <div
                         style={{
                           width: 44,
@@ -258,72 +393,73 @@ const Configuracoes = () => {
                     </div>
 
                     <div className="pt-10 border-top d-flex justify-content-between align-items-center">
-                      <span className="text-muted" style={{ fontSize: 11.5 }}>
-                        {t('configuracoes.companyTab.vatRegime', 'Regime de IVA')}:
+                      <span className="text-muted" style={{ fontSize: 12 }}>
+                        Regime de IVA:
                       </span>
                       <span className={`badge ${BADGE_REGIME[empresaSelecionada.regime_iva] || 'badge-primary'}`}>
-                        {empresaSelecionada.regime_iva || 'Geral'}
+                        {empresaSelecionada.regime_nome || empresaSelecionada.regime_iva}
                       </span>
                     </div>
 
-                    <div className="pt-6 d-flex justify-content-between align-items-center">
-                      <span className="text-muted" style={{ fontSize: 11.5 }}>
-                        {t('configuracoes.companyTab.legalStatus', 'Estado Cadastral')}:
+                    <div className="pt-8 d-flex justify-content-between align-items-center">
+                      <span className="text-muted" style={{ fontSize: 12 }}>
+                        Estado Cadastral:
                       </span>
                       <span className="badge badge-success">
-                        {empresaSelecionada.estado || t('configuracoes.companyTab.active', 'ATIVA')}
+                        {empresaSelecionada.estado || 'ATIVA'}
                       </span>
                     </div>
                   </div>
+                ) : (
+                  <p className="text-muted mb-0">Nenhuma empresa selecionada.</p>
                 )}
               </div>
             </div>
 
-            {/* Aviso de Governança Fiscal */}
-            <div className="card config-card" style={{ border: '1px solid #c8eedf', background: '#f6fbf9' }}>
+            <div className="card card-default" style={{ border: '1px solid #c8eedf', background: '#f6fbf9', borderRadius: 10 }}>
               <div className="card-body p-20">
                 <div className="d-flex align-items-center mb-8" style={{ gap: 8 }}>
                   <span style={{ fontSize: 20 }}>🛡️</span>
                   <strong className="color-success" style={{ fontSize: 13 }}>
-                    {t('configuracoes.companyTab.taxFramework', 'Enquadramento Fiscal')}
+                    Enquadramento Fiscal AGT
                   </strong>
                 </div>
                 <p className="text-muted mb-0" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-                  {t(
-                    'configuracoes.companyTab.registrationSubtitle',
-                    'Informações utilizadas na identificação e nos cabeçalhos dos pareceres de reconciliação.'
-                  )}
+                  Dados oficiais utilizados no confronto contabilístico e nos relatórios de auditoria e reconciliação.
                 </p>
               </div>
             </div>
           </div>
 
           <div className="col-12 col-lg-8">
-            <div className="card config-card">
-              <div className="card-header py-15 px-25 border-bottom d-flex justify-content-between align-items-center">
+            <div className="card card-default" style={{ border: '1px solid #edf0f5', borderRadius: 10 }}>
+              <div className="card-header bg-white py-15 px-20 border-bottom d-flex justify-content-between align-items-center flex-wrap" style={{ gap: 8 }}>
                 <div>
-                  <h5 className="fw-700 color-dark mb-2" style={{ fontSize: 15 }}>
-                    {t('configuracoes.companyTab.registration', 'Ficha Cadastral e Identificação Fiscal')}
+                  <h5 className="fw-700 color-dark mb-0" style={{ fontSize: 15 }}>
+                    Ficha Cadastral e Identificação Fiscal
                   </h5>
                   <span className="text-muted" style={{ fontSize: 12.5 }}>
-                    {t(
-                      'configuracoes.companyTab.registrationSubtitle',
-                      'Dados oficiais registados para efeitos fiscais e contabilísticos em Angola.'
-                    )}
+                    Dados oficiais registados para efeitos fiscais e contabilísticos em Angola.
                   </span>
                 </div>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline-primary d-flex align-items-center"
+                  onClick={() => navigate('/admin-gestao?aba=empresas')}
+                  style={{ borderRadius: 6, fontWeight: 600, padding: '6px 12px', fontSize: 12 }}
+                >
+                  <i className="la la-edit mr-1"></i> Gerir / Editar Cadastro
+                </button>
               </div>
 
-              <div className="card-body p-25">
+              <div className="card-body p-20">
                 {carregandoEmpresa ? (
-                  <p className="text-muted text-center py-30">
-                    {t('common.loading', 'A carregar dados da empresa...')}
-                  </p>
+                  <p className="text-muted text-center py-30">A carregar dados da empresa...</p>
                 ) : empresaSelecionada ? (
                   <div className="row" style={{ rowGap: 16 }}>
                     <div className="col-12 col-md-8">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.corporateName', 'RAZÃO SOCIAL / DENOMINAÇÃO')}
+                        RAZÃO SOCIAL / DENOMINAÇÃO
                       </label>
                       <input
                         type="text"
@@ -336,7 +472,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-4">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.nifLabel', 'NIF (CONTRIBUINTE)')}
+                        NIF (CONTRIBUINTE)
                       </label>
                       <input
                         type="text"
@@ -349,7 +485,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('companies.name', 'NOME COMERCIAL')}
+                        NOME COMERCIAL
                       </label>
                       <input
                         type="text"
@@ -362,7 +498,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('companies.entityType', 'TIPO DE ENTIDADE')}
+                        TIPO DE ENTIDADE
                       </label>
                       <input
                         type="text"
@@ -375,7 +511,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-8">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.caeLabel', 'ACTIVIDADE PRINCIPAL')}
+                        ATIVIDADE PRINCIPAL
                       </label>
                       <input
                         type="text"
@@ -388,7 +524,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-4">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.caeLabel', 'CÓDIGO CAE')}
+                        CÓDIGO CAE
                       </label>
                       <input
                         type="text"
@@ -401,7 +537,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-4">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.cityLabel', 'PROVÍNCIA')}
+                        PROVÍNCIA
                       </label>
                       <input
                         type="text"
@@ -414,7 +550,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-4">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.cityLabel', 'MUNICÍPIO')}
+                        MUNICÍPIO
                       </label>
                       <input
                         type="text"
@@ -427,19 +563,19 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-4">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.companyTab.regimeLabel', 'REGIME DE IVA')}
+                        REGIME DE IVA
                       </label>
                       <input
                         type="text"
                         className="form-control fw-600"
                         readOnly
-                        value={empresaSelecionada.regime_iva || 'Geral'}
+                        value={empresaSelecionada.regime_nome || empresaSelecionada.regime_iva || '—'}
                         style={{ background: '#f8f9fb' }}
                       />
                     </div>
                   </div>
                 ) : (
-                  <p className="text-muted text-center py-30">{t('companies.noResults', 'Nenhuma empresa selecionada.')}</p>
+                  <p className="text-muted text-center py-30">Nenhuma empresa selecionada.</p>
                 )}
               </div>
             </div>
@@ -451,7 +587,7 @@ const Configuracoes = () => {
       {abaAtiva === 'perfil' && (
         <div className="row">
           <div className="col-12 col-lg-4 mb-20">
-            <div className="card config-card text-center p-30">
+            <div className="card card-default text-center p-30" style={{ border: '1px solid #edf0f5', borderRadius: 10 }}>
               <div
                 className="mx-auto mb-15"
                 style={{
@@ -473,7 +609,7 @@ const Configuracoes = () => {
                 {user.username || 'Auditor Fiscal'}
               </h5>
               <span className="badge badge-primary px-10 py-4 mb-10" style={{ fontSize: 11 }}>
-                {t('profile.title', 'Perfil')}: {user.role || 'Auditor / Contabilista'}
+                {user.role || 'Auditor / Contabilista'}
               </span>
               <p className="text-muted mb-0" style={{ fontSize: 12.5 }}>
                 {user.email || 'utilizador@empresa.ao'}
@@ -482,25 +618,22 @@ const Configuracoes = () => {
           </div>
 
           <div className="col-12 col-lg-8">
-            <div className="card config-card">
-              <div className="card-header py-15 px-25 border-bottom">
-                <h5 className="fw-700 color-dark mb-2" style={{ fontSize: 15 }}>
-                  {t('configuracoes.profileTab.title', 'Credenciais & Segurança da Conta')}
+            <div className="card card-default" style={{ border: '1px solid #edf0f5', borderRadius: 10 }}>
+              <div className="card-header bg-white py-15 px-20 border-bottom">
+                <h5 className="fw-700 color-dark mb-0" style={{ fontSize: 15 }}>
+                  Credenciais & Segurança da Conta
                 </h5>
                 <span className="text-muted" style={{ fontSize: 12.5 }}>
-                  {t(
-                    'configuracoes.profileTab.subtitle',
-                    'Atualize o seu nome de utilizador, email e palavra-passe de acesso.'
-                  )}
+                  Atualize o seu nome de utilizador, email e palavra-passe de acesso.
                 </span>
               </div>
 
-              <div className="card-body p-25">
+              <div className="card-body p-20">
                 <form onSubmit={handleSalvarPerfil}>
                   <div className="row" style={{ rowGap: 16 }}>
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.profileTab.username', 'NOME DE UTILIZADOR')}
+                        NOME DE UTILIZADOR
                       </label>
                       <input
                         type="text"
@@ -513,7 +646,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.profileTab.email', 'EMAIL DE NOTIFICAÇÃO')}
+                        EMAIL DE NOTIFICAÇÃO
                       </label>
                       <input
                         type="email"
@@ -525,7 +658,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.profileTab.password', 'NOVA PALAVRA-PASSE (OPCIONAL)')}
+                        NOVA PALAVRA-PASSE (OPCIONAL)
                       </label>
                       <input
                         type="password"
@@ -538,7 +671,7 @@ const Configuracoes = () => {
 
                     <div className="col-12 col-md-6">
                       <label className="fw-600 text-muted mb-4" style={{ fontSize: 12 }}>
-                        {t('configuracoes.profileTab.confirmPassword', 'CONFIRMAR NOVA PALAVRA-PASSE')}
+                        CONFIRMAR NOVA PALAVRA-PASSE
                       </label>
                       <input
                         type="password"
@@ -552,13 +685,11 @@ const Configuracoes = () => {
                     <div className="col-12 pt-10">
                       <button
                         type="submit"
-                        className="btn btn-primary btn-squared"
+                        className="btn btn-primary"
                         disabled={salvandoPerfil}
-                        style={{ fontWeight: 600 }}
+                        style={{ fontWeight: 700, backgroundColor: '#5f63f2', borderColor: '#5f63f2', padding: '8px 20px', borderRadius: 8 }}
                       >
-                        {salvandoPerfil
-                          ? t('configuracoes.profileTab.updatingBtn', 'A Guardar...')
-                          : t('configuracoes.profileTab.updateBtn', 'Guardar Alterações do Perfil')}
+                        {salvandoPerfil ? 'A Guardar...' : 'Guardar Alterações do Perfil'}
                       </button>
                     </div>
                   </div>
@@ -573,74 +704,7 @@ const Configuracoes = () => {
       {abaAtiva === 'parametros' && (
         <div className="row">
           <div className="col-12">
-            <div className="card config-card">
-              <div className="card-header py-15 px-25 border-bottom">
-                <h5 className="fw-700 color-dark mb-2" style={{ fontSize: 15 }}>
-                  {t('configuracoes.taxRatesTab.title', 'Tabela Oficial de Taxas Tributárias (Angola - AGT)')}
-                </h5>
-                <span className="text-muted" style={{ fontSize: 12.5 }}>
-                  {t(
-                    'configuracoes.taxRatesTab.subtitle',
-                    'Parâmetros normativos aplicados pelos motores de auditoria na verificação de conformidade.'
-                  )}
-                </span>
-              </div>
-
-              <div className="card-body p-0">
-                <div className="table-responsive">
-                  <table className="table table-bordered mb-0" style={{ fontSize: 13 }}>
-                    <thead style={{ backgroundColor: '#f9fafb' }}>
-                      <tr>
-                        <th style={{ width: '25%', fontWeight: 700 }}>
-                          {t('configuracoes.taxRatesTab.tax', 'Imposto / Tributo')}
-                        </th>
-                        <th style={{ width: '15%', fontWeight: 700 }}>
-                          {t('configuracoes.taxRatesTab.baseRate', 'Taxa Legal')}
-                        </th>
-                        <th style={{ width: '35%', fontWeight: 700 }}>
-                          {t('configuracoes.taxRatesTab.legalBasis', 'Enquadramento Legal')}
-                        </th>
-                        <th style={{ width: '25%', fontWeight: 700 }}>
-                          {t('coverage.motorsList.M11', 'Prazo de Cumprimento')}
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td><strong>IVA (Imposto sobre o Valor Acrescentado)</strong></td>
-                        <td><span className="badge badge-primary">14% (Geral)</span></td>
-                        <td>Código do IVA (Lei n.º 7/19 de 24 de Abril)</td>
-                        <td>Último dia do mês seguinte ao do período</td>
-                      </tr>
-                      <tr>
-                        <td><strong>Retenção na Fonte a Prestadores</strong></td>
-                        <td><span className="badge badge-warning">6,5%</span></td>
-                        <td>Código do Imposto Industrial (Art. 73.º) e Código do IRT</td>
-                        <td>Até ao último dia do mês seguinte ao pagamento</td>
-                      </tr>
-                      <tr>
-                        <td><strong>Segurança Social (INSS) - Patronal</strong></td>
-                        <td><span className="badge badge-info">8% (Empresa)</span></td>
-                        <td>Decreto Presidencial n.º 227/18 de 27 de Setembro</td>
-                        <td>Até ao dia 10 do mês seguinte</td>
-                      </tr>
-                      <tr>
-                        <td><strong>Segurança Social (INSS) - Trabalhador</strong></td>
-                        <td><span className="badge badge-info">3% (Trabalhador)</span></td>
-                        <td>Decreto Presidencial n.º 227/18 de 27 de Setembro</td>
-                        <td>Até ao dia 10 do mês seguinte</td>
-                      </tr>
-                      <tr>
-                        <td><strong>Regra de Caixa Negativo</strong></td>
-                        <td><span className="badge badge-danger">Saldo Devedor Obrigatório</span></td>
-                        <td>Art. 57.º do Código Geral Tributário (Presunção de Proveitos Omitidos)</td>
-                        <td>Permanente (Conta 4511 não pode ser credora)</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
+            <Taxas />
           </div>
         </div>
       )}

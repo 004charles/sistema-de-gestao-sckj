@@ -7,23 +7,29 @@ from decouple import config
 
 logger = logging.getLogger('reconciliacao')
 
+# Verificado contra a API em Outubro de 2026. Os três modelos que aqui
+# estavam — llama-3.3-70b-versatile, llama-3.1-8b-instant e mixtral-8x7b —
+# foram descontinuados pela Groq, pelo que TODAS as chamadas falhavam em
+# silêncio e o sistema caía sempre na análise heurística. O log registava
+# "Tentando modelo: ..." três vezes seguidas e ninguém reparou.
 MODELS_DISPONIVEIS = [
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'mixtral-8x7b-32768',
+    'openai/gpt-oss-120b',   # 131k de contexto, ~1,5s por resposta
+    'qwen/qwen3.8-27b',      # alternativa mais rápida
+    'openai/gpt-oss-20b',
 ]
+MODELO_PADRAO = MODELS_DISPONIVEIS[0]
 
 def get_groq_client():
     api_key = config('GROQ_API_KEY', default='')
     if not api_key:
         logger.error("GROQ_API_KEY nao configurada no arquivo .env")
         raise ValueError("GROQ_API_KEY nao configurada no arquivo .env")
-    logger.info(f"Cliente Groq criado com chave: {api_key[:10]}...")
+    logger.info("Cliente Groq criado.")
     return Groq(api_key=api_key)
 
 
 def get_model_name():
-    model = config('GROQ_MODEL', default='llama-3.3-70b-versatile')
+    model = config('GROQ_MODEL', default=MODELO_PADRAO)
     logger.info(f"Modelo Groq configurado: {model}")
     return model
 
@@ -99,16 +105,32 @@ FORMATO OBRIGATORIO:
 ====================================
 2. DETALHE DOS DADOS: IGUAIS vs DIFERENCAS
 ====================================
-Apresente OBRIGATORIAMENTE uma tabela markdown com estas colunas exatas:
+Apresente OBRIGATORIAMENTE uma tabela markdown com estas linhas e colunas exatas:
 | Nome do Campo | Contabilidade (Balancete) | AGT (Modelo 7) | Status | Diferença Apurada |
-| Base Tributável | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
-| Imposto a favor do Estado (IVA a pagar) | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
-| Imposto a favor do sujeito passivo | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| Base Tributável / Volume de Negócios | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| IVA Liquidado (Vendas e Serviços - Conta 3453) | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| IVA Dedutível (Compras e Despesas - Conta 3451) | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| IVA a Pagar ao Estado (IVA Liquidado - IVA Dedutível) | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| Saldo de Caixa (Conta 4511) | [valor] Kz | Não aplicável | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+| Retenções na Fonte de 6,5% a Prestadores | [valor] Kz | [valor] Kz | [IGUAIS ou DIFERENÇA] | [valor] Kz |
+
+====================================
+QUADRO OFICIAL DE APURAMENTO DO IVA (LEI N.º 7/19 - CIVA)
+====================================
+Demonstração do cálculo legal obrigatório:
+REGRA LEGAL: IVA a Pagar = IVA Liquidado (Vendas) - IVA Dedutível (Compras)
+• Contabilidade (Balancete): [Liquidado] Kz - [Dedutível] Kz = [IVA a Pagar] Kz
+• Declaração AGT (Modelo 7): [Liquidado] Kz - [Dedutível] Kz = [IVA a Pagar] Kz
+• Confronto Final do IVA a Pagar: [IGUAIS ou DIFERENÇA de X Kz]
 
 ====================================
 3. ANALISE DAS DIFERENCAS DETETADAS
 ====================================
-Para cada diferenca:
+REGRA FUNDAMENTAL: Se TODOS os valores forem IGUAIS (sem diferencas):
+- Escreva: "Nenhuma divergencia detetada. Todos os valores estao em perfeita conformidade."
+- NAO reproduza cabecalhos de tabela nem crie blocos vazios de diferenca.
+
+Se existirem diferencas, para cada diferenca:
 - **[Nome do Campo]**
   - **O que esta no Balancete:** [valor e conta]
   - **O que foi declarado no Modelo 7:** [valor e campo]
@@ -364,56 +386,53 @@ def extrair_dados_balancete(txt):
             if vals and vals[0] > res['iva_custo']:
                 res['iva_custo'] = vals[0]
 
+    # Regra Fundamental do Código do IVA (CIVA - Lei n.º 7/19, Art. 19.º e Seguintes):
+    # O IVA a pagar é obrigatoriamente a diferença entre o IVA Liquidado e o IVA Dedutível
+    apuramento_contab = res['iva_liquidado'] - res['iva_suportado']
+    if apuramento_contab > Decimal('0'):
+        if res['iva_pagar'] == Decimal('0'):
+            res['iva_pagar'] = apuramento_contab
+    elif apuramento_contab < Decimal('0'):
+        if res['iva_recuperar'] == Decimal('0'):
+            res['iva_recuperar'] = abs(apuramento_contab)
+
     return res
 
 
 def extrair_dados_modelo7(txt):
-    """Extrai campos da Declaração Modelo 7 de IVA da AGT."""
-    res = {
-        'base_tributavel': Decimal('0'),
-        'iva_liquidado': Decimal('0'),
-        'iva_dedutivel': Decimal('0'),
-        'iva_pagar': Decimal('0'),
-        'iva_recuperar': Decimal('0'),
-        'fora_prazo': False,
+    """Extrai os campos da Declaração Modelo 7 de IVA da AGT.
+
+    Delega em `agt_modelo7.parse`, que lê os 56 campos do formulário oficial.
+    Esta função mantém-se como contrato estável para quem só precisa dos
+    cinco agregados; use `agt_modelo7.parse` para o documento completo
+    (nº da declaração, data de recepção, substituição, cativo, pro rata...).
+    """
+    from . import agt_modelo7
+
+    lido = agt_modelo7.parse(txt)
+    base = lido['base_tributavel']
+    liq = lido['iva_liquidado']
+    ded = lido['iva_dedutivel']
+    pag = lido['iva_pagar']
+    rec = lido['iva_recuperar']
+
+    # Regra Fundamental do IVA: Liquidado - Dedutível
+    dif_iva = liq - ded
+    if dif_iva > Decimal('0') and pag == Decimal('0'):
+        pag = dif_iva
+    elif dif_iva < Decimal('0') and rec == Decimal('0'):
+        rec = abs(dif_iva)
+
+    return {
+        'base_tributavel': base,
+        'iva_liquidado': liq,
+        'iva_dedutivel': ded,
+        'iva_pagar': pag,
+        'iva_recuperar': rec,
+        # `None` significa "não foi possível ler", não "entregue no prazo".
+        'fora_prazo': bool(lido['fora_prazo']) if lido['fora_prazo'] is not None else False,
+        'completo': lido,
     }
-    if not txt:
-        return res
-
-    for line in txt.split('\n'):
-        # SOMAS 31 [base] 32 [dedutivel] 33 [liquidado]
-        m_somas = re.search(r'SOMAS\s+31\s+([\d\.\s]+,\d{2})\s+32\s+([\d\.\s]+,\d{2})\s+33\s+([\d\.\s]+,\d{2})', line)
-        if m_somas:
-            res['base_tributavel'] = parse_kz(m_somas.group(1))
-            res['iva_dedutivel'] = parse_kz(m_somas.group(2))
-            res['iva_liquidado'] = parse_kz(m_somas.group(3))
-
-        # IVA : 37 [valor a pagar]
-        m_pagar = re.search(r'IVA\s*:\s*37\s+([\d\.\s]+,\d{2})', line)
-        if m_pagar:
-            res['iva_pagar'] = parse_kz(m_pagar.group(1))
-
-        # Crédito a recuperar campo 38 / 39
-        m_rec = re.search(r'(?:(?:campo\s+)?38|39)\s+([\d\.\s]+,\d{2})', line, re.IGNORECASE)
-        if m_rec and res['iva_recuperar'] == Decimal('0'):
-            val_rec = parse_kz(m_rec.group(1))
-            if val_rec > Decimal('0'):
-                res['iva_recuperar'] = val_rec
-
-        if 'FORADOPRAZO' in line.replace(' ', '').upper():
-            res['fora_prazo'] = True
-
-    # Fallback para campos individuais de operações ativas
-    if res['base_tributavel'] == Decimal('0'):
-        m_b = re.search(r'(?:Transmiss[ãa]o\s+de\s+bens[^\n\d]*?1\s+)([\d\.\s]+,\d{2})', txt)
-        if m_b:
-            res['base_tributavel'] = parse_kz(m_b.group(1))
-    if res['iva_liquidado'] == Decimal('0'):
-        m_l = re.search(r'(?:liquidou\s+imposto[^\n\d]*?2\s+)([\d\.\s]+,\d{2})', txt)
-        if m_l:
-            res['iva_liquidado'] = parse_kz(m_l.group(1))
-
-    return res
 
 
 def gerar_analise_heuristica(texto_contabilidade, texto_agt, idioma='pt'):
@@ -447,9 +466,9 @@ def gerar_analise_heuristica(texto_contabilidade, texto_agt, idioma='pt'):
 
     linhas_tabela = [
         ('Volume de Negócios / Base Tributável', fmt_kz(b['vendas']), fmt_kz(m7['base_tributavel']), st_base, fmt_kz(dif_base)),
-        ('IVA Liquidado (Imposto a favor do Estado)', fmt_kz(b['iva_liquidado']), fmt_kz(m7['iva_liquidado']), st_liq, fmt_kz(dif_liq)),
-        ('IVA Dedutível (Imposto a favor do sujeito passivo)', fmt_kz(b['iva_suportado']), fmt_kz(m7['iva_dedutivel']), st_ded, fmt_kz(dif_ded)),
-        ('Imposto a Pagar ao Estado (IVA Apurado)', fmt_kz(b['iva_pagar']), fmt_kz(m7['iva_pagar']), st_pag, fmt_kz(dif_pag)),
+        ('IVA Liquidado (Vendas e Serviços - Conta 3453 vs Campo 21)', fmt_kz(b['iva_liquidado']), fmt_kz(m7['iva_liquidado']), st_liq, fmt_kz(dif_liq)),
+        ('IVA Dedutível (Compras e Despesas - Conta 3451 vs Campo 22)', fmt_kz(b['iva_suportado']), fmt_kz(m7['iva_dedutivel']), st_ded, fmt_kz(dif_ded)),
+        ('IVA a Pagar ao Estado (IVA Liquidado - IVA Dedutível)', fmt_kz(b['iva_pagar']), fmt_kz(m7['iva_pagar']), st_pag, fmt_kz(dif_pag)),
         ('Saldo de Caixa (PGC Conta 4511)', f"-{fmt_kz(b['caixa_saldo_credor'])} (Credor)" if b['caixa_saldo_credor'] > 0 else fmt_kz(b['caixa_saldo_devedor']), 'Não aplicável no Modelo 7', st_caixa, fmt_kz(b['caixa_saldo_credor'])),
         ('Retenções na Fonte de 6,5% a Prestadores (Conta 75234 vs 3493)', f"Honorários: {fmt_kz(b['honorarios_prestadores'])} | Retido: {fmt_kz(b['retencao_prestadores'])}", f"Obrigatório 6,5%: {fmt_kz(ret_obrigatoria)}", st_ret, fmt_kz(dif_ret)),
     ]
@@ -466,6 +485,16 @@ def gerar_analise_heuristica(texto_contabilidade, texto_agt, idioma='pt'):
         tabela_md.append(f"| {campo} | {c_val} | {a_val} | {st} | {dif} |")
 
     tabela_str = '\n'.join(tabela_md)
+
+    quadro_apuramento_iva = f"""====================================
+QUADRO OFICIAL DE APURAMENTO DO IVA (LEI N.º 7/19 - CIVA)
+====================================
+Demonstração do cálculo legal obrigatório:
+REGRA LEGAL: IVA a Pagar = IVA Liquidado (Vendas) - IVA Dedutível (Compras)
+• Contabilidade (Balancete PGC): {fmt_kz(b['iva_liquidado'])} - {fmt_kz(b['iva_suportado'])} = {fmt_kz(b['iva_pagar'])}
+• Declaração AGT (Modelo 7): {fmt_kz(m7['iva_liquidado'])} - {fmt_kz(m7['iva_dedutivel'])} = {fmt_kz(m7['iva_pagar'])}
+• Confronto Final do IVA a Pagar: {st_pag} (Diferença: {fmt_kz(dif_pag)})
+"""
 
     analises_difs = []
     if st_caixa == 'DIFERENÇA':
@@ -517,6 +546,7 @@ def gerar_analise_heuristica(texto_contabilidade, texto_agt, idioma='pt'):
 ====================================
 {tabela_str}
 
+{quadro_apuramento_iva}
 ====================================
 3. ANALISE DAS DIFERENCAS DETETADAS
 ====================================

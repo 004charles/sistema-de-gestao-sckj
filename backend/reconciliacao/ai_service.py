@@ -27,7 +27,8 @@ def get_groq_client():
 
 
 def get_model_name():
-    return config('GROQ_MODEL', default='llama3-70b-8192')
+    from .pdf_service import MODELO_PADRAO
+    return config('GROQ_MODEL', default=MODELO_PADRAO)
 
 
 def montar_contexto_empresa(empresa_id, ano, mes):
@@ -156,12 +157,13 @@ Analise os seguintes dados contábeis e a declaração de IVA apresentada à AGT
 
 Por favor, forneça:
 
-1. **Análise Comparativa**: Compare os dados contábeis com a declaração AGT
-2. **Identificação de Divergências**: Aponte diferenças entre o que está na contabilidade e o que foi declarado
-3. **Explicação Técnica**: Explique cada divergência em termos contábeis
-4. **Classificação de Contas**: Verifique se as contas 24.4.1 a 24.4.5 estão corretamente mapeadas
-5. **Recomendações**: Sugira correções necessárias
-6. **Alertas**: Indique possíveis problemas fiscais ou riscos de auditoria
+1. **Demonstração do Apuramento do IVA (Lei n.º 7/19 - CIVA)**: Calcule e demonstre matematicamente a regra legal: IVA a Pagar = IVA Liquidado (Conta 3453) − IVA Dedutível (Conta 3451)
+2. **Análise Comparativa**: Compare os dados contábeis com a declaração AGT (Modelo 7)
+3. **Identificação de Divergências**: Aponte diferenças entre o que está na contabilidade e o que foi declarado
+4. **Explicação Técnica**: Explique cada divergência em termos contábeis
+5. **Classificação de Contas**: Verifique se as contas do PGC Angolano (Decreto 82/01) — 3451 (IVA Dedutível), 3453 (IVA Liquidado) e 3456 (IVA a Pagar) — estão devidamente regularizadas
+6. **Recomendações**: Sugira correções necessárias
+7. **Alertas e Riscos Fiscais**: Indique possíveis problemas fiscais ou riscos de auditoria perante a AGT
 
 Seja detalhado e preciso na análise."""
 

@@ -40,13 +40,32 @@ _BASES = {
         'artigo': 'Art. 3.º e 4.º — Base tributável de transmissões e prestações de serviço',
         'texto': 'O volume de prestações de serviço e transmissões de bens escriturado deve coincidir com o valor tributável declarado.',
     },
+    'BL-IVA-007': {
+        'legislacao': 'Código do IVA — Lei n.º 7/19 e Lei n.º 42/20',
+        'artigo': 'Art. 27.º — Taxas do imposto',
+        'texto': 'O imposto é liquidado às taxas legalmente previstas: 14% na '
+                 'taxa geral, 7% no regime simplificado e na hotelaria e '
+                 'restauração, 5% nos bens da lista anexa e 2% no regime '
+                 'especial de Cabinda.',
+    },
+    'BL-IVA-008': {
+        'legislacao': 'Código do IVA — Lei n.º 7/19 e Lei n.º 42/20',
+        'artigo': 'Regimes de tributação — exclusão, simplificado e geral',
+        'texto': 'O enquadramento no regime de exclusão, simplificado ou geral '
+                 'resulta do volume de negócios do exercício anterior.',
+    },
     'BL-IRT-001': {
-        'legislacao': 'Código do Imposto sobre o Rendimento do Trabalho — Lei n.º 18/14 e Lei n.º 28/20',
-        'artigo': 'Art. 1.º e 19.º — Incidência e retenção na fonte sobre remunerações de pessoal',
-        'texto': 'As entidades patronais devem proceder à retenção na fonte do IRT incidente sobre as remunerações pagas aos trabalhadores.',
+        'legislacao': 'Código do IRT — Lei n.º 18/14, alterada pela Lei n.º 28/20 '
+                      'e pela Lei n.º 14/25 (OGE 2026)',
+        'artigo': 'Art. 1.º e 19.º — Incidência e retenção na fonte sobre remunerações',
+        'texto': 'As entidades patronais procedem à retenção na fonte do IRT '
+                 'incidente sobre as remunerações pagas aos trabalhadores. A '
+                 'tabela em vigor desde 2026 isenta a matéria colectável até '
+                 '150.000,00 Kz mensais e vai até à taxa marginal de 25%.',
     },
     'BL-IRT-002': {
-        'legislacao': 'Código do IRT — Lei n.º 18/14 e Lei n.º 28/20',
+        'legislacao': 'Código do IRT — Lei n.º 18/14, alterada pela Lei n.º 28/20 '
+                      'e pela Lei n.º 14/25 (OGE 2026)',
         'artigo': 'Art. 20.º — Entrega do imposto retido e mapa mensal',
         'texto': 'O montante do IRT retido deve ser entregue à Repartição Fiscal competente acompanhado da respectiva declaração.',
     },
@@ -126,7 +145,8 @@ _BASES = {
         'texto': 'Os saldos das contas de Depósitos à Ordem e Meios Monetários devem ser periodicamente reconciliados com os extractos bancários oficiais.',
     },
     'BL-IRT-003': {
-        'legislacao': 'Código do IRT — Lei n.º 18/14 e Lei n.º 28/20',
+        'legislacao': 'Código do IRT — Lei n.º 18/14, alterada pela Lei n.º 28/20 '
+                      'e pela Lei n.º 14/25 (OGE 2026)',
         'artigo': 'Art. 20.º — Pagamento e Liquidação Provisória / Definitiva do IRT',
         'texto': 'O pagamento das retenções de IRT deve ser efetuado através de DAR (Documento de Arrecadação de Receitas) até ao final do mês seguinte.',
     },
@@ -206,6 +226,38 @@ REGRAS = [
      'abs(volume_negocios_contab - volume_negocios_declarado)', 'MEDIO',
      'Confrontar o total faturado no razão das contas 61/62 com o campo 1 do Modelo 7.'),
 
+    ('IVA-008', 'M1', 'IVA', 'BL-IVA-007',
+     'Taxa de IVA liquidada não corresponde a nenhuma taxa legal',
+     'A taxa que resulta dos valores declarados (imposto a dividir pela base) '
+     'não coincide com nenhuma das taxas previstas no Código do IVA.',
+     'taxa_iva_desconhecida == 1',
+     'taxa_iva_valor', 'MEDIO',
+     'Confirmar a taxa aplicada. Se a declaração junta operações a taxas '
+     'diferentes, isto é normal e pode marcar-se como revisto.'),
+    ('IVA-009', 'M1', 'IVA', 'BL-IVA-007',
+     'Taxa liquidada diferente da taxa do regime da empresa',
+     'A taxa liquidada não é a que o regime de IVA da empresa prevê.',
+     'taxa_diverge_do_regime == 1 and taxa_iva_reconhecida == 1',
+     'diferenca_taxa_regime', 'MEDIO',
+     'Confirmar o enquadramento: o regime geral liquida a 14% e o '
+     'simplificado a 7% sobre o valor recebido.'),
+    ('IVA-010', 'M1', 'IVA', 'BL-IVA-008',
+     'IVA liquidado por quem está no regime de exclusão',
+     'A empresa está enquadrada no regime de exclusão, que não liquida IVA, '
+     'mas há imposto liquidado no período.',
+     'liquidou_iva_sem_obrigacao == 1',
+     'iva_liquidado', 'ALTO',
+     'Rever o enquadramento: ou a empresa mudou de regime, ou o IVA foi '
+     'liquidado indevidamente.'),
+    ('IVA-011', 'M1', 'IVA', 'BL-IVA-008',
+     'Regime de IVA não corresponde ao volume de negócios',
+     'O volume de negócios declarado impõe um regime diferente daquele em '
+     'que a empresa está registada.',
+     'regime_divergente == 1',
+     '0', 'MEDIO',
+     'Confirmar o enquadramento junto da AGT. Pode haver opção legítima por '
+     'um regime mais exigente.'),
+
     # --- MOTOR 2: IRT ---
     ('IRT-001', 'M2', 'IRT', 'BL-IRT-001',
      'Remunerações de pessoal sem IRT retido contabilizado',
@@ -262,11 +314,13 @@ REGRAS = [
      'inss_contabilizado', 'MEDIO',
      'Carregar o Mapa de Remunerações e o comprovativo de liquidação do INSS do período.'),
     ('SS-002', 'M5', 'Segurança Social', 'BL-SS-002',
-     'Divergência entre encargos patronais contabilizados e taxa legal do INSS (8%)',
-     'Os encargos patronais (conta 725) divergem significativamente da taxa regulamentar de 8% sobre a massa salarial.',
-     'desvio_encargos_anormal == 1',
-     'desvio_encargos_ss', 'MEDIO',
-     'Rever a base de incidência e confirmar se existem subsídios isentos de tributação para a Segurança Social.'),
+     'Contribuições do INSS não correspondem a 8% + 3% da mesma base',
+     'O total entregue ao INSS (conta 3492) devia ser 11% da base sobre a qual '
+     'foram calculados os encargos patronais (conta 725). Não bate.',
+     'inss_incoerente == 1',
+     'desvio_inss_total', 'MEDIO',
+     'Confirmar a base de incidência: os 8% da entidade patronal e os 3% '
+     'retidos ao trabalhador têm de incidir sobre a mesma massa salarial.'),
 
     # --- MOTOR 6: IMPOSTO DO SELO ---
     ('SEL-001', 'M6', 'Imposto do Selo', 'BL-SEL-001',
@@ -299,9 +353,13 @@ REGRAS = [
      'Revisão urgente: a conta Caixa não pode ter saldo credor. Verificar saídas indevidas ou suprimentos não registados.'),
     ('CONT-002', 'M8', 'Contabilidade', 'BL-CONT-002',
      'Desbalanceamento no balancete de verificação',
-     'A soma dos débitos difere da soma dos créditos no balancete do período.',
-     'diferenca_devedor_credor > 0',
-     'diferenca_devedor_credor', 'ALTO',
+     'A soma dos débitos difere da soma dos créditos nas contas de raiz do '
+     'balancete do período.',
+     # Só dispara sobre um balancete de facto, somando as contas de raiz: o
+     # balancete repete os valores por nível hierárquico, e somar todas as
+     # linhas contaria o mesmo movimento várias vezes.
+     'balancete_desequilibrado == 1',
+     'diferenca_balanceamento', 'ALTO',
      'Identificar e corrigir os lançamentos desbalanceados no software de contabilidade.'),
     ('CONT-003', 'M8', 'Contabilidade', 'BL-CONT-003',
      'Clientes correntes com saldo credor anómalo (Conta 311)',

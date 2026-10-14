@@ -4,69 +4,93 @@ Idempotente: correr várias vezes não duplica. Usado pelo comando
 `manage.py seed_motores` e pelos testes.
 """
 from .models import DocumentoRequerido, Motor
+from .taxas import REGIME_GERAL, REGIME_SIMPLIFICADO
 
-# (codigo, nome, descricao, ordem, implementacao, matriz de documentos)
+# Motores que só fazem sentido onde há obrigações de IVA. Uma empresa no
+# regime de exclusão não liquida nem deduz IVA, pelo que receber alertas do
+# motor de IVA seria ruído sobre uma obrigação que não tem.
+COM_IVA = [REGIME_GERAL, REGIME_SIMPLIFICADO]
+
+# Lista vazia = aplica-se a todos os regimes. É o caso da maioria: o IRT, a
+# Segurança Social ou os saldos anormais de caixa não dependem do regime
+# de IVA da empresa.
+# (codigo, nome, descricao, ordem, implementacao, matriz, regimes)
 MOTORES = [
     ('M1', 'Motor IVA completo',
      'Liquidado, dedutível, apurar/pagar/recuperar, taxas, operações tributáveis e isentas.',
      1, 'ACTIVO',
-     ['BALANCETE', 'MODELO7']),
+     ['BALANCETE', 'MODELO7'],
+     COM_IVA),
     ('M2', 'IRT (Imposto sobre o Rendimento do Trabalho)',
      'Retenções de IRT na fonte sobre salários e folha, confronto com declarações.',
      2, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M3', 'Imposto Industrial',
      'Lucro tributável estimado, retenções na fonte de clientes e ajustamentos fiscais.',
      3, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M4', 'Retenções na Fonte',
      'Taxas e valores retidos a fornecedores e colaboradores vs declarações e pagamentos.',
      4, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M5', 'Segurança Social',
      'Contribuições de empresa (8%) e trabalhador (3%) vs folha e pagamentos ao INSS.',
      5, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M6', 'Imposto do Selo',
      'Operações sujeitas a selo, recibos de quitação e documentos contratuais.',
      6, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M7', 'Facturação',
      'Duplicações, saltos de numeração, NIF de clientes/fornecedores e taxas em factura.',
      7, 'ACTIVO',
-     ['BALANCETE', 'MODELO7']),
+     ['BALANCETE', 'MODELO7'],
+     []),
     ('M8', 'Auditoria Contabilística (PGC)',
      'Saldos anormais/negativos de caixa e terceiros, balanceamento e coerência de razão.',
      8, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M9', 'Reconciliação Generalizada',
      'Factura → contabilidade → balancete → declaração → pagamento.',
      9, 'ACTIVO',
-     ['BALANCETE', 'MODELO7']),
+     ['BALANCETE', 'MODELO7'],
+     COM_IVA),
     ('M10', 'Análise de Risco (agregador)',
      'Combina ocorrências dos restantes motores num nível de risco consolidado.',
      10, 'ACTIVO',
+     [],
      []),
     ('M11', 'Obrigações e Prazos',
      'Obrigações declarativas e de pagamento do período vs prazos fiscais angolanos.',
      11, 'ACTIVO',
-     ['MODELO7']),
+     ['MODELO7'],
+     []),
     ('M12', 'Exposição Potencial',
      'Agrega contingências potenciais com fundamentação legal sem pré-julgar multas.',
      12, 'ACTIVO',
+     [],
      []),
     ('M13', 'Anomalias Contabilísticas',
      'Variações bruscas, saldos anormais e custos sem correspondência. "Requer revisão".',
      13, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M14', 'Análise Histórica',
      'Variações mês-a-mês de receitas, IVA e custos entre períodos.',
      14, 'ACTIVO',
-     ['BALANCETE']),
+     ['BALANCETE'],
+     []),
     ('M15', 'Relatório Estruturado',
      'Relatório de auditoria começando pela cobertura, evidências completas e recomendações.',
      15, 'ACTIVO',
-     ['BALANCETE', 'MODELO7']),
+     ['BALANCETE', 'MODELO7'],
+     []),
 ]
 
 DISCLAIMER_COBERTURA = (
@@ -80,7 +104,7 @@ def semear_motores():
     """Cria/actualiza os 15 motores e sincroniza a matriz. Devolve contagens."""
     total_motores = 0
     total_requeridos = 0
-    for codigo, nome, descricao, ordem, implementacao, matriz in MOTORES:
+    for codigo, nome, descricao, ordem, implementacao, matriz, regimes in MOTORES:
         motor, _ = Motor.objects.update_or_create(
             codigo=codigo,
             defaults={
@@ -88,6 +112,7 @@ def semear_motores():
                 'descricao': descricao,
                 'ordem': ordem,
                 'implementacao': implementacao,
+                'regimes_aplicaveis': regimes,
                 'ativo': True,
             },
         )

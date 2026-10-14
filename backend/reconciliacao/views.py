@@ -1,27 +1,32 @@
 import logging
 from decimal import Decimal
+from django.conf import settings
+from django.http import HttpResponse
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view, action
+from rest_framework.decorators import api_view, action, permission_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.permissions import DjangoModelPermissions
 from rest_framework.viewsets import ReadOnlyModelViewSet
 from rest_framework.authtoken.models import Token
-from django.contrib.auth.models import User
+from rest_framework.exceptions import PermissionDenied
+from django.contrib.auth.models import User, Group
 from django.contrib.auth import authenticate
 from django.db.models import Q
 from .models import (
-    Empresa, Contabilidade, DeclaracaoAGT,
+    Empresa, EmpresaUtilizador, Contabilidade, DeclaracaoAGT,
     Reconciliacao, ReconciliacaoDetalhe, MapeamentoConta,
     DocumentoUpload, AnaliseIA, Regra, Ocorrencia,
+    RegistroAcessoAdmin, LancamentoContabilistico, LinhaLancamento
 )
 from .serializers import (
     EmpresaSerializer,
     ContabilidadeSerializer, DeclaracaoAGTSerializer,
     ReconciliacaoSerializer, ReconciliacaoDetalheSerializer,
     MapeamentoContaSerializer, LoginSerializer,
-    ReconciliacaoExecutarSerializer
+    ReconciliacaoExecutarSerializer,
+    LancamentoContabilisticoSerializer, LinhaLancamentoSerializer
 )
 from . import pdf_service
 from . import extracao_service
@@ -30,22 +35,67 @@ from . import cobertura_service
 from . import validacao_documental
 from . import dossie_service
 from . import regra_engine
+from . import calendario_service
+from . import numeros_service
+from . import taxas
+from . import auditoria_trace
+from . import ai_auditoria
+from . import consolidacao_anual
+from . import auto_cadastro_service
 
 logger = logging.getLogger('reconciliacao')
+
+
+def registrar_tentativa_acesso(request, rota, resultado='NEGADO', motivo=''):
+    """Regista no log e na base de dados as tentativas de acesso às áreas de administração."""
+    try:
+        user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else None
+        data = getattr(request, 'data', {}) or {}
+        username = user.username if user else data.get('username', '') or 'Anónimo'
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', ''))
+        if ',' in ip:
+            ip = ip.split(',')[0].strip()
+        user_agent = request.META.get('HTTP_USER_AGENT', '')[:255]
+
+        empresa_nome = ''
+        if user:
+            empresa_acesso = getattr(user, 'acessos_empresas', None)
+            if empresa_acesso and empresa_acesso.exists():
+                empresa_nome = ', '.join([e.empresa.nome for e in empresa_acesso.select_related('empresa').all()[:2]])
+
+        if not empresa_nome and data.get('empresa_nome'):
+            empresa_nome = str(data.get('empresa_nome'))[:255]
+
+        RegistroAcessoAdmin.objects.create(
+            utilizador=user,
+            username=username,
+            empresa_nome=empresa_nome,
+            ip_origem=ip,
+            user_agent=user_agent,
+            rota_tentada=rota[:255],
+            motivo=motivo[:255],
+            resultado=resultado,
+        )
+        logger.warning(
+            f"[AUDITORIA DE SEGURANÇA] Tentativa de acesso {resultado} à rota '{rota}' "
+            f"por utilizador '{username}' (Empresa: '{empresa_nome}', IP: {ip}). Motivo: {motivo}"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao registar auditoria de acesso admin: {e}")
 
 
 def empresas_acessiveis(user):
     if not user or not user.is_authenticated:
         return Empresa.objects.none()
-    # Se o utilizador tem empresas vinculadas em EmpresaUtilizador, restringe estritamente a elas
+    if user.is_superuser or user.is_staff or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists():
+        return Empresa.objects.all()
+    # Se o utilizador é cliente de empresa, restringe estritamente às suas empresas vinculadas
     vinculos = Empresa.objects.filter(
         acessos__utilizador=user,
         acessos__ativo=True,
     ).distinct()
     if vinculos.exists():
         return vinculos
-    if user.is_superuser:
-        return Empresa.objects.all()
     return Empresa.objects.none()
 
 
@@ -81,6 +131,13 @@ def login_view(request):
         user = authenticate(username=username, password=password)
         if user is not None and user.is_active:
             token, _ = Token.objects.get_or_create(user=user)
+            grupos = list(user.groups.values_list('name', flat=True))
+            is_admin = bool(
+                user.is_superuser
+                or user.is_staff
+                or any(g in ['Super Admin', 'Administrador', 'Auditor Chefe'] for g in grupos)
+            )
+            empresas_ids = list(empresas_acessiveis(user).values_list('id', flat=True))
             return Response({
                 'success': True,
                 'user': {
@@ -90,7 +147,11 @@ def login_view(request):
                     'first_name': user.first_name,
                     'last_name': user.last_name,
                     'token': token.key,
-                    'grupos': list(user.groups.values_list('name', flat=True)),
+                    'is_superuser': user.is_superuser,
+                    'is_staff': user.is_staff,
+                    'is_admin': is_admin,
+                    'grupos': grupos,
+                    'empresas_acesso': empresas_ids,
                 }
             })
         return Response({'error': 'Credenciais inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -100,8 +161,8 @@ def login_view(request):
 login_view.cls.permission_classes = [AllowAny]
 
 
-class EmpresaViewSet(ReadOnlyModelViewSet):
-    """Apenas consulta. A criação/edição é feita no Django Admin."""
+class EmpresaViewSet(viewsets.ModelViewSet):
+    """Gestão de empresas: listagem, cadastro, edição e consulta."""
 
     queryset = Empresa.objects.all()
     serializer_class = EmpresaSerializer
@@ -119,6 +180,61 @@ class EmpresaViewSet(ReadOnlyModelViewSet):
         if estado:
             queryset = queryset.filter(estado=estado)
         return queryset
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        is_admin = bool(
+            user.is_superuser
+            or user.is_staff
+            or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+        )
+        if not is_admin and not user.has_perm('reconciliacao.add_empresa'):
+            raise PermissionDenied('Apenas administradores podem cadastrar empresas.')
+        empresa = serializer.save()
+        if not user.is_superuser:
+            EmpresaUtilizador.objects.get_or_create(
+                empresa=empresa,
+                utilizador=user,
+                defaults={'perfil_acesso': 'ADMIN', 'ativo': True}
+            )
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        is_admin = bool(
+            user.is_superuser
+            or user.is_staff
+            or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+        )
+        if not is_admin and not user.has_perm('reconciliacao.change_empresa'):
+            raise PermissionDenied('Apenas administradores podem alterar dados de empresas.')
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        user = request.user
+        is_admin = bool(
+            user.is_superuser
+            or user.is_staff
+            or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+        )
+        if not is_admin and not user.has_perm('reconciliacao.delete_empresa'):
+            raise PermissionDenied('Apenas administradores podem eliminar empresas.')
+
+        try:
+            from django.db import transaction
+            nome_empresa = instance.nome
+            with transaction.atomic():
+                # Remove documentos vinculados para desimpedir chave protegida
+                instance.documentos.all().delete()
+                instance.delete()
+            logger.info(f"Empresa '{nome_empresa}' eliminada com sucesso por {user.username}")
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            logger.error(f"Erro ao eliminar empresa {instance.id}: {e}")
+            return Response(
+                {'error': f'Não foi possível eliminar a empresa: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class ContabilidadeViewSet(viewsets.ModelViewSet):
@@ -352,23 +468,83 @@ def upload_documento_view(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if not empresa_id:
+    empresa = None
+    empresa_existe_inacessivel = False
+    if empresa_id and str(empresa_id).strip().lower() not in ('auto', '0', 'none', '', 'null', 'undefined'):
+        try:
+            empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
+            if not empresa and Empresa.objects.filter(pk=empresa_id).exists():
+                empresa_existe_inacessivel = True
+        except Exception:
+            empresa = None
+
+    if empresa_existe_inacessivel:
         return Response(
-            {'error': 'empresa_id é obrigatório'},
-            status=status.HTTP_400_BAD_REQUEST
+            {'error': 'Empresa não encontrada ou sem acesso.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    empresa_recem_criada = False
+    mensagem_cadastro = ''
+
+    # Se a empresa não foi especificada OU a empresa informada já não existe (ex: foi eliminada):
+    # inspeciona o documento para identificar e pré-cadastrar automaticamente!
+    if empresa is None:
+        import tempfile
+        import os
+        extensao = ('.' + arquivo.name.rsplit('.', 1)[-1].lower() if '.' in arquivo.name else '')
+        with tempfile.NamedTemporaryFile(suffix=extensao, delete=False) as tmp:
+            for chunk in arquivo.chunks():
+                tmp.write(chunk)
+            tmp_caminho = tmp.name
+        try:
+            conteudo = extracao_service.extrair_conteudo(tmp_caminho, arquivo.name)
+            texto_up = conteudo.get('texto') or ''
+            dados_cad = auto_cadastro_service.extrair_dados_empresa_do_texto(texto_up, arquivo.name)
+            if dados_cad.get('nif') or dados_cad.get('nome'):
+                emp_auto, criada, msg = auto_cadastro_service.obter_ou_cadastrar_empresa_automatica(
+                    dados_cad, user=request.user, auto_criar=True
+                )
+                if emp_auto:
+                    empresa = emp_auto
+                    empresa_id = emp_auto.id
+                    empresa_recem_criada = criada
+                    mensagem_cadastro = msg
+            if ano is None or mes is None:
+                ano_det, mes_det, _ = dossie_service.detectar_periodo_e_nif(texto_up)
+                ano = ano or ano_det
+                mes = mes or mes_det
+        finally:
+            if os.path.exists(tmp_caminho):
+                os.remove(tmp_caminho)
+
+    if not empresa:
+        if not empresa_id or str(empresa_id).strip().lower() in ('auto', '0', 'none', '', 'null', 'undefined'):
+            return Response(
+                {
+                    'error': (
+                        'empresa_id é obrigatório. '
+                        'Não foi possível identificar automaticamente os dados da empresa (NIF/Nome) '
+                        'no documento para efetuar o pré-cadastro.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response(
+            {
+                'error': (
+                    'Empresa não encontrada ou sem acesso. '
+                    'Não foi possível identificar automaticamente os dados da empresa (NIF/Nome) '
+                    'no documento para efetuar o pré-cadastro.'
+                )
+            },
+            status=status.HTTP_404_NOT_FOUND
         )
 
     if ano is None or mes is None or not (2000 <= ano <= 2100) or not (1 <= mes <= 12):
         return Response(
             {'error': 'ano (2000-2100) e mes (1-12) são obrigatórios'},
             status=status.HTTP_400_BAD_REQUEST
-        )
-
-    empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
-    if empresa is None:
-        return Response(
-            {'error': 'Empresa não encontrada ou sem acesso.'},
-            status=status.HTTP_404_NOT_FOUND
         )
 
     if tipo:
@@ -526,6 +702,8 @@ def upload_documento_view(request):
             'estado': documento.estado,
             'empresa': empresa.id,
             'empresa_nome': empresa.nome,
+            'empresa_recem_criada': empresa_recem_criada,
+            'mensagem_cadastro': mensagem_cadastro,
             'ano': documento.ano,
             'mes': documento.mes,
             'nome_arquivo': documento.nome_arquivo,
@@ -592,6 +770,21 @@ def detectar_documento_view(request):
                     empresa_detetada = emp
                     break
 
+        empresa_recem_criada = False
+        mensagem_cadastro = ''
+
+        # Auto-cadastro inteligente: se a empresa não existe na base, extrai dados e cadastra automaticamente!
+        if not empresa_detetada:
+            dados_cad = auto_cadastro_service.extrair_dados_empresa_do_texto(texto, arquivo.name)
+            if dados_cad.get('nif') or dados_cad.get('nome'):
+                emp_auto, criada, msg = auto_cadastro_service.obter_ou_cadastrar_empresa_automatica(
+                    dados_cad, user=request.user, auto_criar=True
+                )
+                if emp_auto:
+                    empresa_detetada = emp_auto
+                    empresa_recem_criada = criada
+                    mensagem_cadastro = msg
+
         ano, mes, _ = dossie_service.detectar_periodo_e_nif(texto)
 
         return Response({
@@ -603,6 +796,8 @@ def detectar_documento_view(request):
             'empresa_id': empresa_detetada.id if empresa_detetada else None,
             'empresa_nome': empresa_detetada.nome if empresa_detetada else None,
             'empresa_nif': empresa_detetada.nif if empresa_detetada else None,
+            'empresa_recem_criada': empresa_recem_criada,
+            'mensagem_cadastro': mensagem_cadastro,
             'ano': ano,
             'mes': mes,
         })
@@ -963,6 +1158,55 @@ def cobertura_view(request, empresa_id, ano, mes):
 
 
 @api_view(['GET'])
+def taxas_view(request):
+    """Tabela de taxas e regimes em vigor (§12).
+
+    Alimenta Definições → Parâmetros Fiscais, que até aqui tinha os valores
+    escritos à mão no JSX e por isso envelhecia sem ninguém dar conta.
+    """
+    return Response(taxas.referencia())
+
+
+@api_view(['GET'])
+def numeros_view(request, empresa_id, ano, mes):
+    """Os números do período: em risco, erros, OK, prazos (§33).
+
+    É a resposta única que alimenta a página de Auditoria. Substitui o hábito
+    anterior de três páginas pedirem o mesmo dashboard e cada uma repintar os
+    mesmos dados de maneira diferente.
+    """
+    if not (2000 <= ano <= 2100 and 1 <= mes <= 12):
+        return Response(
+            {'error': 'ano (2000-2100) e mes (1-12) inválidos'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
+    if empresa is None:
+        return Response(
+            {'error': 'Empresa não encontrada ou sem acesso.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    return Response(numeros_service.calcular(empresa, ano, mes))
+
+
+@api_view(['GET'])
+def prazos_view(request, empresa_id, ano, mes):
+    """Calendário fiscal do período: o que falta entregar e quando vence."""
+    if not (2000 <= ano <= 2100 and 1 <= mes <= 12):
+        return Response(
+            {'error': 'ano (2000-2100) e mes (1-12) inválidos'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
+    if empresa is None:
+        return Response(
+            {'error': 'Empresa não encontrada ou sem acesso.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    return Response(calendario_service.resumo(empresa, ano, mes))
+
+
+@api_view(['GET'])
 def dashboard_auditoria_periodo_view(request, empresa_id, ano, mes):
     """Retorna a visão unificada do dashboard de auditoria do período (§33)."""
     if not (2000 <= ano <= 2100 and 1 <= mes <= 12):
@@ -1111,6 +1355,300 @@ def dashboard_auditoria_periodo_view(request, empresa_id, ano, mes):
     })
 
 
+@api_view(['GET'])
+def rasto_auditoria_view(request, empresa_id, ano, mes):
+    """Rasto determinístico da auditoria técnica passo-a-passo (§32, §33)."""
+    if not (2000 <= ano <= 2100 and 1 <= mes <= 12):
+        return Response(
+            {'error': 'ano (2000-2100) e mes (1-12) inválidos'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
+    if empresa is None:
+        return Response(
+            {'error': 'Empresa não encontrada ou sem acesso.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    numeros = numeros_service.calcular(empresa, ano, mes)
+    rasto = auditoria_trace.gerar(empresa, ano, mes, numeros)
+    return Response(rasto)
+
+
+@api_view(['GET', 'POST'])
+def parecer_ia_view(request, empresa_id, ano, mes):
+    """Parecer e análise de riscos com IA (ou fallback determinístico) para contabilistas."""
+    if not (2000 <= ano <= 2100 and 1 <= mes <= 12):
+        return Response(
+            {'error': 'ano (2000-2100) e mes (1-12) inválidos'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    empresa = empresas_acessiveis(request.user).filter(pk=empresa_id).first()
+    if empresa is None:
+        return Response(
+            {'error': 'Empresa não encontrada ou sem acesso.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    numeros = numeros_service.calcular(empresa, ano, mes)
+    rasto = auditoria_trace.gerar(empresa, ano, mes, numeros)
+    parecer_resultado = ai_auditoria.parecer(rasto, numeros)
+    riscos_resultado = ai_auditoria.riscos(rasto, numeros)
+
+    return Response({
+        'parecer': parecer_resultado,
+        'riscos': riscos_resultado,
+        'rasto': rasto,
+        'numeros': numeros,
+    })
+
+
+@api_view(['GET'])
+def admin_estatisticas_view(request):
+    """Métricas consolidadas para a Área Administrativa."""
+    user = request.user
+    is_admin = bool(
+        user.is_authenticated
+        and (
+            user.is_superuser
+            or user.is_staff
+            or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+        )
+    )
+    if not is_admin:
+        registrar_tentativa_acesso(
+            request,
+            rota='/api/admin/estatisticas/',
+            resultado='NEGADO',
+            motivo='Tentativa de aceder às métricas administrativas globais por utilizador de empresa.'
+        )
+        raise PermissionDenied('Acesso reservado ao Administrador do Sistema. As empresas não têm permissão para aceder à Gestão Global.')
+
+    empresas_qs = Empresa.objects.all().order_by('nome')
+    total_empresas = empresas_qs.count()
+    ativas = empresas_qs.filter(estado='ATIVA').count()
+    inativas = total_empresas - ativas
+    total_users = User.objects.count()
+
+    lista = []
+    total_risco_global = Decimal('0.00')
+
+    for emp in empresas_qs:
+        docs_count = emp.documentos.count()
+        ultimo_doc = emp.documentos.order_by('-ano', '-mes', '-created_at').first()
+        ano_ref = ultimo_doc.ano if ultimo_doc else 2026
+        mes_ref = ultimo_doc.mes if ultimo_doc else 7
+
+        occs = Ocorrencia.objects.filter(empresa=emp, ano=ano_ref, mes=mes_ref).exclude(estado='IGNORADA')
+        erros_count = occs.filter(severidade__in=['ALTO', 'MEDIO']).count()
+
+        risco_empresa = Decimal('0.00')
+        for occ in occs.filter(severidade__in=['ALTO', 'MEDIO']):
+            try:
+                risco_empresa += Decimal(str(occ.diferenca or 0))
+            except Exception:
+                pass
+
+        total_risco_global += risco_empresa
+
+        lista.append({
+            'id': emp.id,
+            'nome': emp.nome,
+            'nif': emp.nif,
+            'regime_iva': emp.regime_iva,
+            'regime_nome': emp.caracteristicas_regime.get('nome', emp.regime_iva),
+            'estado': emp.estado,
+            'volume_negocios_anual': str(emp.volume_negocios_anual or '0.00'),
+            'telefone': emp.telefone or '',
+            'email': emp.email or '',
+            'endereco': emp.endereco or '',
+            'provincia': emp.provincia or '',
+            'contabilista_nome': emp.contabilista_nome or '',
+            'total_documentos': docs_count,
+            'ultimo_periodo': f'{mes_ref:02d}/{ano_ref}' if docs_count > 0 else 'Sem dados',
+            'erros_contagem': erros_count,
+            'em_risco': str(risco_empresa),
+        })
+
+    return Response({
+        'total_empresas': total_empresas,
+        'empresas_ativas': ativas,
+        'empresas_inativas': inativas,
+        'total_utilizadores': total_users,
+        'total_risco_global': str(total_risco_global),
+        'empresas': lista,
+    })
+
+
+@api_view(['GET', 'POST'])
+def admin_utilizadores_view(request):
+    """Gestão de utilizadores e atribuição a empresas."""
+    user = request.user
+    is_admin = bool(
+        user.is_authenticated
+        and (
+            user.is_superuser
+            or user.is_staff
+            or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+        )
+    )
+    if not is_admin:
+        registrar_tentativa_acesso(
+            request,
+            rota='/api/admin/utilizadores/',
+            resultado='NEGADO',
+            motivo='Tentativa de aceder à gestão de utilizadores globais.'
+        )
+        raise PermissionDenied('Acesso reservado ao Administrador do Sistema. As empresas não têm permissão para aceder à Gestão Global.')
+
+    if request.method == 'GET':
+        users = User.objects.all().order_by('-date_joined')
+        data = []
+        for u in users:
+            vinculos = EmpresaUtilizador.objects.filter(utilizador=u, ativo=True).select_related('empresa')
+            data.append({
+                'id': u.id,
+                'username': u.username,
+                'email': u.email,
+                'first_name': u.first_name,
+                'last_name': u.last_name,
+                'is_active': u.is_active,
+                'is_staff': u.is_staff,
+                'is_superuser': u.is_superuser,
+                'grupos': list(u.groups.values_list('name', flat=True)),
+                'empresas': [
+                    {'id': v.empresa.id, 'nome': v.empresa.nome, 'nif': v.empresa.nif, 'perfil': v.perfil_acesso}
+                    for v in vinculos
+                ]
+            })
+        return Response(data)
+
+    elif request.method == 'POST':
+        username = request.data.get('username')
+        password = request.data.get('password')
+        email = request.data.get('email', '')
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        papel = request.data.get('papel', 'Contabilista')
+        empresas_ids = request.data.get('empresas_ids', [])
+
+        if not username or not password:
+            return Response({'error': 'Nome de utilizador e palavra-passe são obrigatórios.'}, status=400)
+        if User.objects.filter(username=username).exists():
+            return Response({'error': 'Já existe um utilizador registado com este nome.'}, status=400)
+
+        novo_user = User.objects.create_user(
+            username=username,
+            password=password,
+            email=email,
+            first_name=first_name,
+            last_name=last_name
+        )
+
+        grupo = Group.objects.filter(name=papel).first()
+        if grupo:
+            novo_user.groups.add(grupo)
+
+        if papel in ['Super Admin', 'Administrador']:
+            novo_user.is_staff = True
+            novo_user.save()
+
+        for emp_id in empresas_ids:
+            emp = Empresa.objects.filter(pk=emp_id).first()
+            if emp:
+                EmpresaUtilizador.objects.create(
+                    empresa=emp,
+                    utilizador=novo_user,
+                    perfil_acesso='ADMIN' if papel in ['Super Admin', 'Administrador'] else 'CONTABILISTA',
+                    ativo=True
+                )
+
+        return Response({
+            'success': True,
+            'id': novo_user.id,
+            'username': novo_user.username
+        }, status=201)
+
+
+@api_view(['PUT', 'PATCH', 'DELETE'])
+def admin_utilizador_detalhe_view(request, user_id):
+    """Editar ou eliminar utilizador (apenas admin)."""
+    user = request.user
+    if not (user.is_superuser or user.is_staff or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()):
+        registrar_tentativa_acesso(
+            request,
+            rota=f'/api/admin/utilizadores/{user_id}/',
+            resultado='NEGADO',
+            motivo='Tentativa de editar ou eliminar utilizador sem privilégios master.'
+        )
+        raise PermissionDenied('Apenas o Administrador pode gerir utilizadores.')
+    alvo = User.objects.filter(pk=user_id).first()
+    if not alvo:
+        return Response({'error': 'Utilizador não encontrado.'}, status=404)
+
+    if request.method == 'DELETE':
+        if alvo.id == user.id:
+            return Response({'error': 'Não é possível eliminar o próprio utilizador com sessão iniciada.'}, status=400)
+        alvo.delete()
+        return Response({'success': True})
+
+    # PUT / PATCH - Atualização do utilizador
+    data = request.data
+    if 'first_name' in data:
+        alvo.first_name = data.get('first_name', '').strip()
+    if 'last_name' in data:
+        alvo.last_name = data.get('last_name', '').strip()
+    if 'email' in data:
+        alvo.email = data.get('email', '').strip()
+    if 'is_active' in data:
+        alvo.is_active = bool(data.get('is_active'))
+    if 'password' in data and data.get('password'):
+        alvo.set_password(data.get('password'))
+
+    papel = data.get('papel')
+    if papel:
+        alvo.groups.clear()
+        grupo = Group.objects.filter(name=papel).first()
+        if grupo:
+            alvo.groups.add(grupo)
+        if papel in ['Super Admin', 'Administrador']:
+            alvo.is_staff = True
+            if papel == 'Super Admin':
+                alvo.is_superuser = True
+        else:
+            if not user.is_superuser:
+                alvo.is_staff = False
+                alvo.is_superuser = False
+
+    alvo.save()
+
+    # Atualizar empresas vinculadas se fornecido
+    if 'empresas_ids' in data:
+        novas_empresas_ids = [int(i) for i in data.get('empresas_ids', []) if str(i).isdigit()]
+        # Remove vínculos antigos
+        EmpresaUtilizador.objects.filter(utilizador=alvo).exclude(empresa_id__in=novas_empresas_ids).delete()
+        for emp_id in novas_empresas_ids:
+            emp = Empresa.objects.filter(pk=emp_id).first()
+            if emp:
+                EmpresaUtilizador.objects.get_or_create(
+                    empresa=emp,
+                    utilizador=alvo,
+                    defaults={
+                        'perfil_acesso': 'ADMIN' if papel in ['Super Admin', 'Administrador'] else 'CONTABILISTA',
+                        'ativo': True
+                    }
+                )
+
+    return Response({
+        'success': True,
+        'id': alvo.id,
+        'username': alvo.username,
+        'email': alvo.email,
+        'first_name': alvo.first_name,
+        'last_name': alvo.last_name,
+        'is_active': alvo.is_active
+    })
+
+
+
 def _serializar_regra(regra, completo=False):
     base = regra.base_legal
     dados = {
@@ -1239,7 +1777,7 @@ def executar_ocorrencias_view(request):
             {'error': 'Sem permissão para executar o motor de regras.'},
             status=status.HTTP_403_FORBIDDEN
         )
-    empresa_id = _inteiro_opcional(request.data.get('empresa'))
+    empresa_id = _inteiro_opcional(request.data.get('empresa') or request.data.get('empresa_id'))
     ano = _inteiro_opcional(request.data.get('ano'))
     mes = _inteiro_opcional(request.data.get('mes'))
     if not empresa_id or ano is None or mes is None:
@@ -1282,26 +1820,1161 @@ def listar_regras_view(request):
 
 @api_view(['PATCH'])
 def validar_regra_view(request, regra_id):
-    """Validação humana de regras (decisão 2): POR_VALIDAR → VALIDADA/REJEITADA."""
+    """Gestão e validação de regras pelo administrador."""
     if not verificar_permissao(request.user, 'change_regra'):
         return Response(
-            {'error': 'Sem permissão para validar regras.'},
+            {'error': 'Sem permissão para alterar regras.'},
             status=status.HTTP_403_FORBIDDEN
         )
     regra = Regra.objects.filter(pk=regra_id).first()
     if regra is None:
         return Response({'error': 'Regra não encontrada'}, status=404)
+
+    if 'activa' in request.data:
+        regra.activa = bool(request.data.get('activa'))
+
+    if 'severidade' in request.data:
+        sev = request.data.get('severidade')
+        if sev in [c[0] for c in Regra.SEVERIDADE_CHOICES]:
+            regra.severidade = sev
+
     novo_estado = request.data.get('estado_validacao')
-    estados = [c[0] for c in Regra.ESTADO_VALIDACAO_CHOICES]
-    if novo_estado not in estados:
-        return Response(
-            {'error': f'estado_validacao deve ser um de: {", ".join(estados)}'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    from django.utils import timezone
-    regra.estado_validacao = novo_estado
-    regra.validado_por = request.user
-    regra.validado_em = timezone.now()
-    regra.validacao_nota = str(request.data.get('nota') or '')[:2000]
+    if novo_estado:
+        estados = [c[0] for c in Regra.ESTADO_VALIDACAO_CHOICES]
+        if novo_estado not in estados:
+            return Response(
+                {'error': f'estado_validacao deve ser um de: {", ".join(estados)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        from django.utils import timezone
+        regra.estado_validacao = novo_estado
+        regra.validado_por = request.user
+        regra.validado_em = timezone.now()
+        if 'nota' in request.data:
+            regra.validacao_nota = str(request.data.get('nota') or '')[:2000]
+
     regra.save()
     return Response(_serializar_regra(regra, completo=True))
+
+
+CONFIG_FILE_PATH = settings.BASE_DIR / 'configuracoes_sistema.json'
+
+DEFAULT_CONFIGURACOES = {
+    'nome_sistema': 'SCKJ - Sistema de Reconciliação Contabilística & Fiscal',
+    'versao_sistema': 'v2.4.0 (OGE Angola 2026)',
+    'modo_manutencao': False,
+    'idioma_padrao': 'pt',
+    'fuso_horario': 'Africa/Luanda (GMT+1)',
+    'limite_upload_mb': 50,
+    'taxa_iva_geral': 14.0,
+    'taxa_retencao_fonte_ii': 6.5,
+    'taxa_inss_patronal': 8.0,
+    'taxa_inss_trabalhador': 3.0,
+    'limite_alerta_risco_kz': 5000000.0,
+    'prazo_inss_dia': 10,
+    'prazo_iva_dia': 31,
+    'notificacoes_email_ativas': True,
+    'email_alertas_fiscal': 'auditoria@sckj.co.ao',
+}
+
+
+@api_view(['GET', 'POST', 'PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def admin_configuracoes_view(request):
+    """
+    Endpoint para consulta e atualização das configurações globais do sistema administrativo.
+    Apenas acessível a Super Administradores e utilizadores Staff.
+    """
+    user = request.user
+    if not (user.is_superuser or user.is_staff or getattr(user, 'is_admin', False)):
+        registrar_tentativa_acesso(
+            request,
+            rota='/api/admin/configuracoes/',
+            resultado='NEGADO',
+            motivo='Tentativa de aceder ou alterar configurações globais sem privilégios master.'
+        )
+        return Response(
+            {'error': 'Acesso restrito ao Administrador do Sistema. As empresas não têm permissão para aceder à Gestão Global.'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    import json
+    dados = {**DEFAULT_CONFIGURACOES}
+    if CONFIG_FILE_PATH.exists():
+        try:
+            with open(CONFIG_FILE_PATH, 'r', encoding='utf-8') as f:
+                salvo = json.load(f)
+                if isinstance(salvo, dict):
+                    dados.update(salvo)
+        except Exception:
+            pass
+
+    if request.method in ['POST', 'PUT', 'PATCH']:
+        novos_dados = request.data
+        for k in DEFAULT_CONFIGURACOES.keys():
+            if k in novos_dados:
+                dados[k] = novos_dados[k]
+        try:
+            with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(dados, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return Response({'error': f'Erro ao persistir configurações: {str(e)}'}, status=500)
+
+    return Response(dados)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def admin_registrar_tentativa_view(request):
+    """
+    Endpoint para registar tentativas indevidas de navegação ou acesso ao Admin.
+    Permite registar tanto acessos autenticados de utilizadores de empresas como não autenticados.
+    """
+    rota = request.data.get('rota', '/admin-gestao')
+    motivo = request.data.get('motivo', 'Tentativa de navegação direta à Área Administrativa por utilizador de empresa.')
+    registrar_tentativa_acesso(request, rota=rota, resultado='NEGADO', motivo=motivo)
+    return Response({'status': 'registado', 'message': 'Tentativa de acesso indevido registada para auditoria de segurança.'})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_listar_registros_acesso_view(request):
+    """
+    Consulta o registo de auditoria de segurança de tentativas de acesso (apenas Super Admin / Staff).
+    """
+    user = request.user
+    is_admin = bool(
+        user.is_superuser
+        or user.is_staff
+        or user.groups.filter(name__in=['Super Admin', 'Administrador']).exists()
+    )
+    if not is_admin:
+        registrar_tentativa_acesso(
+            request,
+            rota='/api/admin/registros-acesso/',
+            resultado='NEGADO',
+            motivo='Tentativa de ler registos de auditoria de segurança sem privilégios.'
+        )
+        return Response({'error': 'Acesso reservado ao Administrador do Sistema.'}, status=status.HTTP_403_FORBIDDEN)
+
+    registros = RegistroAcessoAdmin.objects.all().order_by('-created_at')[:100]
+    dados = [
+        {
+            'id': r.id,
+            'username': r.username or 'Anónimo',
+            'empresa_nome': r.empresa_nome or 'Não associada',
+            'ip_origem': r.ip_origem or '—',
+            'user_agent': r.user_agent or '—',
+            'rota_tentada': r.rota_tentada,
+            'motivo': r.motivo,
+            'resultado': r.resultado,
+            'created_at': r.created_at.isoformat(),
+        }
+        for r in registros
+    ]
+    return Response({
+        'total': RegistroAcessoAdmin.objects.count(),
+        'total_bloqueados': RegistroAcessoAdmin.objects.filter(resultado='NEGADO').count(),
+        'registros': dados
+    })
+
+
+from .pgc_data import (
+    CLASSES_PGC,
+    CONTAS_PGC,
+    PRINCIPIOS_PGC,
+    CRITERIOS_VALORIMETRIA,
+    DEMONSTRACOES_FINANCEIRAS,
+    NOTAS_ANEXO,
+    PGC_PME_COMPARATIVO,
+    QUADRO_07_RECONCILIACAO_FISCAL,
+    DIPLOMA_LEGAL,
+)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_pgc_view(request):
+    """
+    Compêndio Integral do Plano Geral de Contabilidade (PGC) de Angola (Decreto n.º 82/01).
+    Retorna o quadro de contas com 157 subcontas normalizadas, princípios contabilísticos,
+    critérios de valorimetria, demonstrações financeiras oficiais, 26 notas do anexo,
+    comparativo PGC-PME (Dec. Executivo 39/19) e reconciliação fiscal (Quadro 07 Modelo 1 AGT).
+    """
+    classe_filtro = request.GET.get('classe')
+    pesquisa = (request.GET.get('pesquisa') or request.GET.get('q') or '').strip().lower()
+
+    contas = CONTAS_PGC
+    if classe_filtro and classe_filtro != 'TODAS':
+        try:
+            num = int(classe_filtro)
+            contas = [c for c in contas if c['classe'] == num]
+        except ValueError:
+            pass
+
+    if pesquisa:
+        contas = [
+            c for c in contas
+            if pesquisa in c['codigo'].lower()
+            or pesquisa in c['nome'].lower()
+            or pesquisa in c['fiscal_relevancia'].lower()
+            or pesquisa in c.get('debito_por', '').lower()
+            or pesquisa in c.get('credito_por', '').lower()
+            or pesquisa in c.get('saft_taxonomia', '').lower()
+        ]
+
+    return Response({
+        'classes': CLASSES_PGC,
+        'contas': contas,
+        'total': len(contas),
+        'total_oficial': len(CONTAS_PGC),
+        'principios': PRINCIPIOS_PGC,
+        'criterios_valorimetria': CRITERIOS_VALORIMETRIA,
+        'demonstracoes_financeiras': DEMONSTRACOES_FINANCEIRAS,
+        'notas_anexo': NOTAS_ANEXO,
+        'pgc_pme_comparativo': PGC_PME_COMPARATIVO,
+        'quadro_07_reconciliacao': QUADRO_07_RECONCILIACAO_FISCAL,
+        'diploma_legal': DIPLOMA_LEGAL,
+        'base_legal': 'Decreto n.º 82/01, de 16 de Novembro (Diário da República Iª Série, N.º 53)',
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_pgc_export_excel_view(request):
+    """
+    Gera e faz o download da folha de cálculo Excel (.xlsx) contendo todo o Compêndio
+    do Plano Geral de Contabilidade de Angola (Decreto 82/01) estruturado em 7 abas:
+    1. Quadro de Contas & Dinâmica (150+ Contas e Taxonomias SAF-T)
+    2. Balanço Oficial (Modelo Decreto 82/01)
+    3. Demonstração dos Resultados por Natureza (DRN)
+    4. Princípios Contabilísticos Fundamentais
+    5. Critérios de Valorimetria & Avaliação Patrimonial
+    6. Comparativo PGC Geral vs PGC-PME (Dec. Executivo 39/19)
+    7. Reconciliação Fiscal: Quadro 07 da Modelo 1 do Imposto Industrial
+    """
+    import io
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = openpyxl.Workbook()
+
+    primary_fill = PatternFill(start_color="5F63F2", end_color="5F63F2", fill_type="solid")
+    dark_fill = PatternFill(start_color="272B41", end_color="272B41", fill_type="solid")
+    accent_fill = PatternFill(start_color="20C997", end_color="20C997", fill_type="solid")
+    warning_fill = PatternFill(start_color="FA8B0C", end_color="FA8B0C", fill_type="solid")
+    zebra_fill = PatternFill(start_color="F8F9FE", end_color="F8F9FE", fill_type="solid")
+
+    header_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+    title_font = Font(name="Arial", size=13, bold=True, color="272B41")
+    subtitle_font = Font(name="Arial", size=9.5, italic=True, color="6C757D")
+    section_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    bold_font = Font(name="Arial", size=9.5, bold=True)
+    regular_font = Font(name="Arial", size=9.5)
+
+    thin_border = Border(
+        left=Side(style='thin', color='E2E8F0'),
+        right=Side(style='thin', color='E2E8F0'),
+        top=Side(style='thin', color='E2E8F0'),
+        bottom=Side(style='thin', color='E2E8F0'),
+    )
+
+    # ==============================================================
+    # ABA 1: QUADRO DE CONTAS & DINÂMICA CONTABILÍSTICA (150+ CONTAS)
+    # ==============================================================
+    ws1 = wb.active
+    ws1.title = "1. Quadro de Contas (PGC)"
+
+    ws1.merge_cells("A1:J1")
+    ws1["A1"] = "REPÚBLICA DE ANGOLA — PLANO GERAL DE CONTABILIDADE (DECRETO N.º 82/01)"
+    ws1["A1"].font = title_font
+    ws1["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws1.merge_cells("A2:J2")
+    ws1["A2"] = "Quadro de Contas Oficial (157 Subcontas), Dinâmica Débito/Crédito, Mapeamento Fiscal AGT e Taxonomia SAF-T AO"
+    ws1["A2"].font = subtitle_font
+    ws1["A2"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws1.row_dimensions[1].height = 26
+    ws1.row_dimensions[2].height = 18
+    ws1.row_dimensions[4].height = 28
+
+    headers1 = [
+        ("Código", 12),
+        ("Designação da Conta (PGC)", 38),
+        ("Classe Contabilística", 26),
+        ("Natureza", 14),
+        ("Tipo", 18),
+        ("Debita-se por...", 45),
+        ("Credita-se por...", 45),
+        ("Relevância Fiscal AGT (IVA / II / IRT / INSS)", 48),
+        ("Taxonomia SAF-T AO (Dec. Exec. 385/20)", 28),
+        ("Base Legal", 30),
+    ]
+
+    for col_idx, (text, width) in enumerate(headers1, 1):
+        cell = ws1.cell(row=4, column=col_idx, value=text)
+        cell.fill = primary_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws1.column_dimensions[col_letter].width = width
+
+    for row_idx, conta in enumerate(CONTAS_PGC, 5):
+        ws1.row_dimensions[row_idx].height = 24
+        fill = zebra_fill if row_idx % 2 == 0 else None
+        vals = [
+            conta["codigo"],
+            conta["nome"],
+            conta["classe_nome"],
+            conta["natureza"],
+            conta["tipo"],
+            conta.get("debito_por", "-"),
+            conta.get("credito_por", "-"),
+            conta["fiscal_relevancia"],
+            conta.get("saft_taxonomia", "-"),
+            conta["base_legal"],
+        ]
+        for col_idx, val in enumerate(vals, 1):
+            cell = ws1.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = bold_font if col_idx == 1 else regular_font
+            cell.border = thin_border
+            if fill:
+                cell.fill = fill
+            if col_idx in [1, 4]:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_idx in [6, 7, 8]:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            elif col_idx == 9:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    # ==============================================================
+    # ABA 2: BALANÇO OFICIAL (DECRETO N.º 82/01)
+    # ==============================================================
+    ws2 = wb.create_sheet(title="2. Balanço Oficial")
+    ws2.merge_cells("A1:D1")
+    ws2["A1"] = "BALANÇO SINTÉTICO OFICIAL — DECRETO N.º 82/01"
+    ws2["A1"].font = title_font
+    ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers2 = [("Secção / Rubrica Patrimonial", 45), ("Contas PGC Enquadradas", 28), ("Nota no Anexo", 18), ("Tipo", 20)]
+    ws2.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers2, 1):
+        cell = ws2.cell(row=3, column=col_idx, value=text)
+        cell.fill = dark_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws2.column_dimensions[col_letter].width = width
+
+    curr_row = 4
+    seccoes_balanco = [
+        ("ATIVO NÃO CORRENTE (FIXO)", DEMONSTRACOES_FINANCEIRAS["balanco"]["ativo_nao_corrente"], primary_fill),
+        ("ATIVO CORRENTE (CIRCULANTE)", DEMONSTRACOES_FINANCEIRAS["balanco"]["ativo_corrente"], primary_fill),
+        ("CAPITAL PRÓPRIO (SITUAÇÃO LÍQUIDA)", DEMONSTRACOES_FINANCEIRAS["balanco"]["capital_proprio"], accent_fill),
+        ("PASSIVO NÃO CORRENTE (EXIGÍVEL A MÉDIO E LONGO PRAZO)", DEMONSTRACOES_FINANCEIRAS["balanco"]["passivo_nao_corrente"], dark_fill),
+        ("PASSIVO CORRENTE (EXIGÍVEL A CURTO PRAZO)", DEMONSTRACOES_FINANCEIRAS["balanco"]["passivo_corrente"], dark_fill),
+    ]
+
+    for title, items, fill_color in seccoes_balanco:
+        ws2.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=4)
+        c = ws2.cell(row=curr_row, column=1, value=title)
+        c.fill = fill_color
+        c.font = section_font
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        ws2.row_dimensions[curr_row].height = 22
+        curr_row += 1
+
+        for item in items:
+            ws2.row_dimensions[curr_row].height = 20
+            ws2.cell(row=curr_row, column=1, value=item["rubrica"]).font = bold_font
+            ws2.cell(row=curr_row, column=2, value=item["contas"]).alignment = Alignment(horizontal="center")
+            ws2.cell(row=curr_row, column=3, value=item["nota"]).alignment = Alignment(horizontal="center")
+            ws2.cell(row=curr_row, column=4, value=title.split(" (")[0]).alignment = Alignment(horizontal="center")
+            for c_idx in range(1, 5):
+                ws2.cell(row=curr_row, column=c_idx).border = thin_border
+            curr_row += 1
+
+    # ==============================================================
+    # ABA 3: DEMONSTRAÇÃO DOS RESULTADOS POR NATUREZA (DRN)
+    # ==============================================================
+    ws3 = wb.create_sheet(title="3. Demonstração Resultados DRN")
+    ws3.merge_cells("A1:C1")
+    ws3["A1"] = "DEMONSTRAÇÃO DOS RESULTADOS POR NATUREZA (DRN) — MODELO DECRETO 82/01"
+    ws3["A1"].font = title_font
+    ws3["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers3 = [("Código", 12), ("Designação da Rubrica Oficial", 65), ("Contas do PGC / Fórmula de Apuramento", 35)]
+    ws3.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers3, 1):
+        cell = ws3.cell(row=3, column=col_idx, value=text)
+        cell.fill = primary_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws3.column_dimensions[col_letter].width = width
+
+    for row_idx, item in enumerate(DEMONSTRACOES_FINANCEIRAS["drn"]["linhas"], 4):
+        ws3.row_dimensions[row_idx].height = 22
+        is_subtotal = item["codigo"] in ["MB", "RO", "RC", "RAI", "RLE"]
+        fnt = bold_font if is_subtotal else regular_font
+        bg = zebra_fill if is_subtotal else None
+
+        c1 = ws3.cell(row=row_idx, column=1, value=item["codigo"])
+        c2 = ws3.cell(row=row_idx, column=2, value=item["designacao"])
+        c3 = ws3.cell(row=row_idx, column=3, value=item["contas"])
+
+        for c in [c1, c2, c3]:
+            c.font = fnt
+            c.border = thin_border
+            if bg:
+                c.fill = bg
+        c1.alignment = Alignment(horizontal="center", vertical="center")
+        c2.alignment = Alignment(horizontal="left", vertical="center")
+        c3.alignment = Alignment(horizontal="center", vertical="center")
+
+    # ==============================================================
+    # ABA 4: PRINCÍPIOS CONTABILÍSTICOS FUNDAMENTAIS
+    # ==============================================================
+    ws4 = wb.create_sheet(title="4. Princípios Contabilísticos")
+    ws4.merge_cells("A1:E1")
+    ws4["A1"] = "PRINCÍPIOS CONTABILÍSTICOS FUNDAMENTAIS — QUADRO CONCEPTUAL DO PGC"
+    ws4["A1"].font = title_font
+    ws4["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers4 = [
+        ("Código", 12),
+        ("Nome do Princípio", 28),
+        ("Conceito Técnico Oficial (Decreto 82/01)", 50),
+        ("Exemplo Prático na Empresa", 45),
+        ("Impacto em Auditoria & Fiscalidade AGT", 45),
+    ]
+    ws4.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers4, 1):
+        cell = ws4.cell(row=3, column=col_idx, value=text)
+        cell.fill = accent_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws4.column_dimensions[col_letter].width = width
+
+    for row_idx, princ in enumerate(PRINCIPIOS_PGC, 4):
+        ws4.row_dimensions[row_idx].height = 36
+        vals = [princ["codigo"], princ["nome"], princ["conceito"], princ["exemplo"], princ["auditoria_relevancia"]]
+        for col_idx, val in enumerate(vals, 1):
+            cell = ws4.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = bold_font if col_idx <= 2 else regular_font
+            cell.border = thin_border
+            if col_idx == 1:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    # ==============================================================
+    # ABA 5: CRITÉRIOS DE VALORIMETRIA
+    # ==============================================================
+    ws5 = wb.create_sheet(title="5. Critérios de Valorimetria")
+    ws5.merge_cells("A1:D1")
+    ws5["A1"] = "CRITÉRIOS DE VALORIMETRIA E AVALIAÇÃO PATRIMONIAL (DECRETO N.º 82/01)"
+    ws5["A1"].font = title_font
+    ws5["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers5 = [("Área Patrimonial", 30), ("Enquadramento Normativo", 30), ("Regras de Valorimetria do PGC", 65), ("Impacto Fiscal AGT", 45)]
+    ws5.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers5, 1):
+        cell = ws5.cell(row=3, column=col_idx, value=text)
+        cell.fill = dark_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws5.column_dimensions[col_letter].width = width
+
+    curr_row5 = 4
+    for crit in CRITERIOS_VALORIMETRIA:
+        regras_formatadas = "\n• " + "\n• ".join(crit["regras"])
+        ws5.row_dimensions[curr_row5].height = 55
+        c1 = ws5.cell(row=curr_row5, column=1, value=crit["area"])
+        c2 = ws5.cell(row=curr_row5, column=2, value=crit["norma_pgc"])
+        c3 = ws5.cell(row=curr_row5, column=3, value=regras_formatadas)
+        c4 = ws5.cell(row=curr_row5, column=4, value=crit["impacto_fiscal"])
+
+        c1.font = bold_font
+        c2.font = regular_font
+        c3.font = regular_font
+        c4.font = bold_font
+
+        for cell in [c1, c2, c3, c4]:
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        curr_row5 += 1
+
+    # ==============================================================
+    # ABA 6: COMPARATIVO PGC GERAL VS PGC-PME (DEC. EXECUTIVO 39/19)
+    # ==============================================================
+    ws6 = wb.create_sheet(title="6. Comparativo PGC vs PME")
+    ws6.merge_cells("A1:D1")
+    ws6["A1"] = "QUADRO COMPARATIVO: PGC GERAL (DEC. 82/01) vs PGC-PME (DEC. EXECUTIVO 39/19)"
+    ws6["A1"].font = title_font
+    ws6["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers6 = [("Critério de Comparação", 30), ("PGC Geral (Decreto 82/01)", 45), ("PGC-PME (Decreto Executivo 39/19)", 45), ("Relevância Prática no Escritório", 45)]
+    ws6.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers6, 1):
+        cell = ws6.cell(row=3, column=col_idx, value=text)
+        cell.fill = accent_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws6.column_dimensions[col_letter].width = width
+
+    for row_idx, item in enumerate(PGC_PME_COMPARATIVO, 4):
+        ws6.row_dimensions[row_idx].height = 36
+        c1 = ws6.cell(row=row_idx, column=1, value=item["criterio"])
+        c2 = ws6.cell(row=row_idx, column=2, value=item["pgc_geral"])
+        c3 = ws6.cell(row=row_idx, column=3, value=item["pgc_pme"])
+        c4 = ws6.cell(row=row_idx, column=4, value=item["relevancia"])
+
+        c1.font = bold_font
+        c2.font = regular_font
+        c3.font = regular_font
+        c4.font = regular_font
+
+        for c in [c1, c2, c3, c4]:
+            c.border = thin_border
+            c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    # ==============================================================
+    # ABA 7: RECONCILIAÇÃO FISCAL: QUADRO 07 DA MODELO 1 DA AGT
+    # ==============================================================
+    ws7 = wb.create_sheet(title="7. Reconciliação Fiscal Q07")
+    ws7.merge_cells("A1:E1")
+    ws7["A1"] = "RECONCILIAÇÃO FISCAL: QUADRO 07 DA DECLARAÇÃO MODELO 1 DO IMPOSTO INDUSTRIAL"
+    ws7["A1"].font = title_font
+    ws7["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers7 = [("Campo Modelo 1", 15), ("Descrição da Correção Fiscal", 50), ("Conta PGC", 24), ("Operação", 35), ("Fundamento Legal (Lei 19/14)", 40)]
+    ws7.row_dimensions[3].height = 26
+    for col_idx, (text, width) in enumerate(headers7, 1):
+        cell = ws7.cell(row=3, column=col_idx, value=text)
+        cell.fill = warning_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws7.column_dimensions[col_letter].width = width
+
+    for row_idx, q in enumerate(QUADRO_07_RECONCILIACAO_FISCAL, 4):
+        ws7.row_dimensions[row_idx].height = 30
+        c1 = ws7.cell(row=row_idx, column=1, value=q["campo"])
+        c2 = ws7.cell(row=row_idx, column=2, value=q["descricao"])
+        c3 = ws7.cell(row=row_idx, column=3, value=q["conta_pgc"])
+        c4 = ws7.cell(row=row_idx, column=4, value=q["operacao"])
+        c5 = ws7.cell(row=row_idx, column=5, value=q["fundamento_legal"])
+
+        c1.font = bold_font
+        c2.font = bold_font if "MATÉRIA" in q["descricao"] else regular_font
+        c3.font = regular_font
+        c4.font = bold_font
+        c5.font = regular_font
+
+        for c in [c1, c2, c3, c4, c5]:
+            c.border = thin_border
+            c.alignment = Alignment(horizontal="left", vertical="center")
+        c1.alignment = Alignment(horizontal="center", vertical="center")
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    response = HttpResponse(
+        output.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="PGC_Angola_Decreto_82_01_Completo.xlsx"'
+    return response
+
+
+# ==============================================================================
+# MÓDULO CONTABILÍSTICO OPERACIONAL (DIÁRIO, RAZÃO E BALANCETE GERADO VIA PGC)
+# ==============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def listar_criar_lancamentos_view(request):
+    """
+    Livro Diário de Lançamentos Contabilísticos (Partidas Dobradas).
+    GET: Lista lançamentos filtrados por empresa, período e tipo de diário.
+    POST: Regista novo lançamento garantindo Débito == Crédito e conformidade PGC.
+    """
+    user = request.user
+    acessiveis = empresas_acessiveis(user)
+
+    if request.method == 'GET':
+        qs = LancamentoContabilistico.objects.filter(empresa__in=acessiveis).select_related('empresa', 'criado_por').prefetch_related('linhas')
+
+        empresa_id = _inteiro_opcional(request.query_params.get('empresa') or request.query_params.get('empresa_id'))
+        if empresa_id:
+            qs = qs.filter(empresa_id=empresa_id)
+
+        ano = _inteiro_opcional(request.query_params.get('ano'))
+        if ano:
+            qs = qs.filter(ano=ano)
+
+        mes = _inteiro_opcional(request.query_params.get('mes'))
+        if mes:
+            qs = qs.filter(mes=mes)
+
+        tipo_diario = request.query_params.get('tipo_diario')
+        if tipo_diario and tipo_diario != 'TODOS':
+            qs = qs.filter(tipo_diario=tipo_diario)
+
+        estado = request.query_params.get('estado')
+        if estado and estado != 'TODOS':
+            qs = qs.filter(estado=estado)
+
+        pesquisa = (request.query_params.get('pesquisa') or request.query_params.get('q') or '').strip()
+        if pesquisa:
+            qs = qs.filter(
+                Q(numero_diario__icontains=pesquisa)
+                | Q(descricao__icontains=pesquisa)
+                | Q(documento_referencia__icontains=pesquisa)
+                | Q(linhas__terceiro_nome__icontains=pesquisa)
+                | Q(linhas__terceiro_nif__icontains=pesquisa)
+                | Q(linhas__conta_codigo__icontains=pesquisa)
+                | Q(linhas__conta_nome__icontains=pesquisa)
+            ).distinct()
+
+        serializer = LancamentoContabilisticoSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        empresa_id = _inteiro_opcional(data.get('empresa') or data.get('empresa_id'))
+        if not empresa_id or not acessiveis.filter(pk=empresa_id).exists():
+            return Response({'error': 'Empresa inválida ou sem permissão de acesso.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data['empresa'] = empresa_id
+        ano = int(data.get('ano') or 2026)
+        mes = int(data.get('mes') or 7)
+        data['ano'] = ano
+        data['mes'] = mes
+
+        if not data.get('data_lancamento'):
+            data['data_lancamento'] = f"{ano}-{mes:02d}-01"
+
+        if not data.get('numero_diario'):
+            ultimo = LancamentoContabilistico.objects.filter(empresa_id=empresa_id, ano=ano).count()
+            data['numero_diario'] = f"DIA-{ano}-{(ultimo + 1):04d}"
+
+        # Calcular totais a partir das linhas
+        linhas = data.get('linhas', [])
+        total_d = sum(Decimal(str(l.get('debito', 0) or 0)) for l in linhas)
+        total_c = sum(Decimal(str(l.get('credito', 0) or 0)) for l in linhas)
+        data['total_debito'] = str(total_d)
+        data['total_credito'] = str(total_c)
+
+        serializer = LancamentoContabilisticoSerializer(data=data)
+        if serializer.is_valid():
+            lancamento = serializer.save(criado_por=user, empresa_id=empresa_id)
+            return Response(LancamentoContabilisticoSerializer(lancamento).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def detalhe_lancamento_view(request, lancamento_id):
+    """Consulta, edição ou anulação de um lançamento contabilístico específico."""
+    acessiveis = empresas_acessiveis(request.user)
+    lancamento = LancamentoContabilistico.objects.filter(pk=lancamento_id, empresa__in=acessiveis).first()
+    if not lancamento:
+        return Response({'error': 'Lançamento não encontrado ou sem permissão.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(LancamentoContabilisticoSerializer(lancamento).data)
+
+    elif request.method in ['PUT', 'PATCH']:
+        serializer = LancamentoContabilisticoSerializer(lancamento, data=request.data, partial=(request.method == 'PATCH'))
+        if serializer.is_valid():
+            # Se vierem linhas novas na edição, atualizar
+            if 'linhas' in request.data:
+                lancamento.linhas.all().delete()
+                for idx, l in enumerate(request.data.get('linhas', []), start=1):
+                    LinhaLancamento.objects.create(
+                        lancamento=lancamento,
+                        ordem=l.get('ordem', idx),
+                        conta_codigo=l.get('conta_codigo', '').strip(),
+                        conta_nome=l.get('conta_nome', '').strip(),
+                        debito=Decimal(str(l.get('debito', 0) or 0)),
+                        credito=Decimal(str(l.get('credito', 0) or 0)),
+                        descricao_linha=l.get('descricao_linha', '').strip(),
+                        terceiro_nif=l.get('terceiro_nif', '').strip(),
+                        terceiro_nome=l.get('terceiro_nome', '').strip(),
+                    )
+            lancamento = serializer.save()
+            return Response(LancamentoContabilisticoSerializer(lancamento).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        lancamento.delete()
+        return Response({'success': True, 'message': 'Lançamento eliminado com sucesso.'}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def razao_contabilistico_view(request):
+    """
+    Livro Razão / Extrato de Contas do PGC.
+    Permite inspecionar todos os movimentos a débito e a crédito de uma conta
+    (ex: 43.1 Bancos, 31.1 Clientes, 34.5 IVA) e calcular o saldo acumulado.
+    """
+    acessiveis = empresas_acessiveis(request.user)
+    empresa_id = _inteiro_opcional(request.query_params.get('empresa') or request.query_params.get('empresa_id'))
+    if not empresa_id or not acessiveis.filter(pk=empresa_id).exists():
+        return Response({'error': 'Empresa inválida ou não especificada.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    ano = _inteiro_opcional(request.query_params.get('ano')) or 2026
+    mes = _inteiro_opcional(request.query_params.get('mes'))
+    conta_codigo = (request.query_params.get('conta') or request.query_params.get('conta_codigo') or '').strip()
+
+    linhas_qs = LinhaLancamento.objects.filter(
+        lancamento__empresa_id=empresa_id,
+        lancamento__ano=ano,
+        lancamento__estado='CONFIRMADO'
+    ).select_related('lancamento').order_by('lancamento__data_lancamento', 'lancamento__id', 'ordem')
+
+    if conta_codigo:
+        linhas_qs = linhas_qs.filter(conta_codigo__startswith=conta_codigo)
+
+    if mes:
+        linhas_qs = linhas_qs.filter(lancamento__mes=mes)
+
+    # Agrupar por conta
+    contas_map = {}
+    for linha in linhas_qs:
+        cod = linha.conta_codigo
+        if cod not in contas_map:
+            contas_map[cod] = {
+                'conta_codigo': cod,
+                'conta_nome': linha.conta_nome,
+                'total_debito': Decimal('0.00'),
+                'total_credito': Decimal('0.00'),
+                'saldo_final': Decimal('0.00'),
+                'natureza_saldo': 'Devedor',
+                'movimentos': [],
+            }
+
+        item = contas_map[cod]
+        item['total_debito'] += linha.debito
+        item['total_credito'] += linha.credito
+
+        saldo_parcial = item['total_debito'] - item['total_credito']
+        item['saldo_final'] = abs(saldo_parcial)
+        item['natureza_saldo'] = 'Devedor' if saldo_parcial >= 0 else 'Credor'
+
+        item['movimentos'].append({
+            'lancamento_id': linha.lancamento.id,
+            'numero_diario': linha.lancamento.numero_diario,
+            'data': linha.lancamento.data_lancamento.strftime('%Y-%m-%d'),
+            'tipo_diario': linha.lancamento.tipo_diario,
+            'descricao': linha.descricao_linha or linha.lancamento.descricao,
+            'documento_referencia': linha.lancamento.documento_referencia,
+            'terceiro_nome': linha.terceiro_nome,
+            'terceiro_nif': linha.terceiro_nif,
+            'debito': str(linha.debito),
+            'credito': str(linha.credito),
+            'saldo_apos': str(abs(saldo_parcial)),
+            'natureza_apos': item['natureza_saldo'],
+        })
+
+    lista_contas = sorted(contas_map.values(), key=lambda x: x['conta_codigo'])
+    return Response({
+        'empresa_id': empresa_id,
+        'ano': ano,
+        'mes': mes,
+        'total_contas_movimentadas': len(lista_contas),
+        'contas': lista_contas,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def balancete_gerado_view(request):
+    """
+    Geração Oficial do Balancete de Verificação a partir dos Lançamentos Reais da Empresa.
+    Obedece às 8 Classes do PGC (Decreto n.º 82/01):
+    Calcula Débitos, Créditos, Saldo Devedor e Saldo Credor por Conta e por Classe.
+    """
+    acessiveis = empresas_acessiveis(request.user)
+    empresa_id = _inteiro_opcional(request.query_params.get('empresa') or request.query_params.get('empresa_id'))
+    if not empresa_id or not acessiveis.filter(pk=empresa_id).exists():
+        return Response({'error': 'Empresa não encontrada ou sem permissão.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    ano = _inteiro_opcional(request.query_params.get('ano')) or 2026
+    mes = _inteiro_opcional(request.query_params.get('mes')) or 7
+
+    empresa = acessiveis.get(pk=empresa_id)
+
+    # Buscar todos os lançamentos confirmados até ao mês selecionado
+    linhas = LinhaLancamento.objects.filter(
+        lancamento__empresa_id=empresa_id,
+        lancamento__ano=ano,
+        lancamento__mes__lte=mes,
+        lancamento__estado='CONFIRMADO'
+    ).select_related('lancamento')
+
+    contas_balancete = {}
+    totais = {
+        'total_debito_mes': Decimal('0.00'),
+        'total_credito_mes': Decimal('0.00'),
+        'total_debito_acumulado': Decimal('0.00'),
+        'total_credito_acumulado': Decimal('0.00'),
+        'total_saldo_devedor': Decimal('0.00'),
+        'total_saldo_credor': Decimal('0.00'),
+    }
+
+    for l in linhas:
+        cod = l.conta_codigo
+        if cod not in contas_balancete:
+            classe_num = int(cod[0]) if cod and cod[0].isdigit() else 0
+            contas_balancete[cod] = {
+                'codigo': cod,
+                'nome': l.conta_nome,
+                'classe': classe_num,
+                'debito_mes': Decimal('0.00'),
+                'credito_mes': Decimal('0.00'),
+                'debito_acumulado': Decimal('0.00'),
+                'credito_acumulado': Decimal('0.00'),
+                'saldo_devedor': Decimal('0.00'),
+                'saldo_credor': Decimal('0.00'),
+            }
+
+        c = contas_balancete[cod]
+        c['debito_acumulado'] += l.debito
+        c['credito_acumulado'] += l.credito
+
+        if l.lancamento.mes == mes:
+            c['debito_mes'] += l.debito
+            c['credito_mes'] += l.credito
+
+    # Calcular saldos e totais gerais
+    linhas_lista = []
+    for cod in sorted(contas_balancete.keys()):
+        c = contas_balancete[cod]
+        saldo = c['debito_acumulado'] - c['credito_acumulado']
+        if saldo > 0:
+            c['saldo_devedor'] = saldo
+            c['saldo_credor'] = Decimal('0.00')
+        elif saldo < 0:
+            c['saldo_devedor'] = Decimal('0.00')
+            c['saldo_credor'] = abs(saldo)
+
+        totais['total_debito_mes'] += c['debito_mes']
+        totais['total_credito_mes'] += c['credito_mes']
+        totais['total_debito_acumulado'] += c['debito_acumulado']
+        totais['total_credito_acumulado'] += c['credito_acumulado']
+        totais['total_saldo_devedor'] += c['saldo_devedor']
+        totais['total_saldo_credor'] += c['saldo_credor']
+
+        linhas_lista.append({
+            'codigo': c['codigo'],
+            'nome': c['nome'],
+            'classe': c['classe'],
+            'debito_mes': str(c['debito_mes']),
+            'credito_mes': str(c['credito_mes']),
+            'debito_acumulado': str(c['debito_acumulado']),
+            'credito_acumulado': str(c['credito_acumulado']),
+            'saldo_devedor': str(c['saldo_devedor']),
+            'saldo_credor': str(c['saldo_credor']),
+        })
+
+    balanceado = (totais['total_saldo_devedor'] == totais['total_saldo_credor'])
+
+    return Response({
+        'empresa_id': empresa.id,
+        'empresa_nome': empresa.nome,
+        'empresa_nif': empresa.nif,
+        'ano': ano,
+        'mes': mes,
+        'balanceado': balanceado,
+        'totais': {k: str(v) for k, v in totais.items()},
+        'total_contas': len(linhas_lista),
+        'linhas': linhas_lista,
+    })
+
+
+# ==============================================================================
+# LEGISLAÇÃO FISCAL DE ANGOLA - COMPÊNDIO & EXPORTAÇÃO EXCEL
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def legislacao_fiscal_view(request):
+    """
+    Compêndio Oficial da Legislação Fiscal Angolana.
+    Suporta filtros por código de diploma (CIVA, CII, CIRT, CIS, CGT, RJFDE, INSS)
+    e pesquisa textual em tempo real sobre artigos, títulos e âmbito.
+    """
+    from .legislacao_fiscal_data import get_diplomas_fiscais, DIPLOMAS_FISCAIS
+    filtro_codigo = request.query_params.get('diploma') or request.query_params.get('codigo')
+    termo = request.query_params.get('pesquisa') or request.query_params.get('q') or ''
+
+    diplomas = get_diplomas_fiscais(filtro_codigo, termo)
+    return Response({
+        'total_diplomas': len(diplomas),
+        'diplomas': diplomas,
+        'codigos_disponiveis': [
+            {'codigo': d['codigo'], 'nome': d['nome'], 'taxa_geral': d['taxa_geral']}
+            for d in DIPLOMAS_FISCAIS
+        ]
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def legislacao_fiscal_export_excel_view(request):
+    """
+    Gera e faz o download da folha de cálculo Excel (.xlsx) contendo todo o Compêndio
+    da Legislação Fiscal de Angola estruturado por Diplomas e Artigos Fiscais.
+    """
+    import io
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from .legislacao_fiscal_data import DIPLOMAS_FISCAIS
+
+    wb = openpyxl.Workbook()
+
+    primary_fill = PatternFill(start_color="1A365D", end_color="1A365D", fill_type="solid")
+    dark_fill = PatternFill(start_color="272B41", end_color="272B41", fill_type="solid")
+    accent_fill = PatternFill(start_color="2B50ED", end_color="2B50ED", fill_type="solid")
+    zebra_fill = PatternFill(start_color="F8F9FE", end_color="F8F9FE", fill_type="solid")
+
+    header_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+    title_font = Font(name="Arial", size=13, bold=True, color="272B41")
+    subtitle_font = Font(name="Arial", size=9.5, italic=True, color="6C757D")
+    section_font = Font(name="Arial", size=10.5, bold=True, color="FFFFFF")
+    bold_font = Font(name="Arial", size=9.5, bold=True)
+    regular_font = Font(name="Arial", size=9.5)
+
+    thin_border = Border(
+        left=Side(style='thin', color='E2E8F0'),
+        right=Side(style='thin', color='E2E8F0'),
+        top=Side(style='thin', color='E2E8F0'),
+        bottom=Side(style='thin', color='E2E8F0')
+    )
+
+    # ABA 1: RESUMO DOS DIPLOMAS FISCAIS
+    ws1 = wb.active
+    ws1.title = "Códigos Tributários Angola"
+    ws1.views.sheetView[0].showGridLines = True
+
+    ws1.merge_cells('A1:E1')
+    ws1['A1'] = "COMPÊNDIO OFICIAL DA LEGISLAÇÃO FISCAL DE ANGOLA"
+    ws1['A1'].font = title_font
+    ws1['A1'].alignment = Alignment(vertical="center")
+    ws1.row_dimensions[1].height = 28
+
+    ws1.merge_cells('A2:E2')
+    ws1['A2'] = "Enquadramento Legal, Taxas, Prazos Declarativos e Normas Tributárias em Vigor"
+    ws1['A2'].font = subtitle_font
+    ws1.row_dimensions[2].height = 18
+
+    headers1 = ["Código", "Diploma Fiscal", "Base Legal", "Taxa Geral / Regime", "Âmbito de Aplicação"]
+    for col_idx, h in enumerate(headers1, 1):
+        cell = ws1.cell(row=4, column=col_idx, value=h)
+        cell.font = header_font
+        cell.fill = primary_fill
+        cell.alignment = Alignment(horizontal="center" if col_idx == 1 else "left", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws1.row_dimensions[4].height = 26
+
+    current_row = 5
+    for d in DIPLOMAS_FISCAIS:
+        ws1.cell(row=current_row, column=1, value=d['codigo']).alignment = Alignment(horizontal="center", vertical="top")
+        ws1.cell(row=current_row, column=2, value=d['nome']).alignment = Alignment(vertical="top", wrap_text=True)
+        ws1.cell(row=current_row, column=3, value=d['diploma']).alignment = Alignment(vertical="top", wrap_text=True)
+        ws1.cell(row=current_row, column=4, value=d['taxa_geral']).alignment = Alignment(vertical="top", wrap_text=True)
+        ws1.cell(row=current_row, column=5, value=d['ambito']).alignment = Alignment(vertical="top", wrap_text=True)
+
+        for col_idx in range(1, 6):
+            cell = ws1.cell(row=current_row, column=col_idx)
+            cell.font = regular_font
+            cell.border = thin_border
+            if current_row % 2 == 0:
+                cell.fill = zebra_fill
+        ws1.row_dimensions[current_row].height = 42
+        current_row += 1
+
+    ws1.column_dimensions['A'].width = 12
+    ws1.column_dimensions['B'].width = 38
+    ws1.column_dimensions['C'].width = 36
+    ws1.column_dimensions['D'].width = 24
+    ws1.column_dimensions['E'].width = 50
+
+    # ABA 2: ARTIGOS E NORMAS DETALHADAS POR DIPLOMA
+    ws2 = wb.create_sheet(title="Artigos e Normas Chave")
+    ws2.views.sheetView[0].showGridLines = True
+
+    ws2.merge_cells('A1:D1')
+    ws2['A1'] = "ARTIGOS-CHAVE E NORMAS TRIBUTÁRIAS POR DIPLOMA FISCAL"
+    ws2['A1'].font = title_font
+    ws2['A1'].alignment = Alignment(vertical="center")
+    ws2.row_dimensions[1].height = 28
+
+    headers2 = ["Diploma", "Artigo / Norma", "Título / Matéria", "Disposição Legal e Procedimento"]
+    for col_idx, h in enumerate(headers2, 1):
+        cell = ws2.cell(row=3, column=col_idx, value=h)
+        cell.font = header_font
+        cell.fill = accent_fill
+        cell.alignment = Alignment(horizontal="center" if col_idx <= 2 else "left", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws2.row_dimensions[3].height = 26
+
+    current_row = 4
+    for d in DIPLOMAS_FISCAIS:
+        for a in d['artigos_chave']:
+            ws2.cell(row=current_row, column=1, value=d['codigo']).alignment = Alignment(horizontal="center", vertical="top")
+            ws2.cell(row=current_row, column=2, value=a['artigo']).alignment = Alignment(horizontal="center", vertical="top")
+            ws2.cell(row=current_row, column=3, value=a['titulo']).alignment = Alignment(vertical="top", wrap_text=True)
+            ws2.cell(row=current_row, column=4, value=a['conteudo']).alignment = Alignment(vertical="top", wrap_text=True)
+
+            for col_idx in range(1, 5):
+                cell = ws2.cell(row=current_row, column=col_idx)
+                cell.font = regular_font
+                cell.border = thin_border
+                if current_row % 2 == 0:
+                    cell.fill = zebra_fill
+            ws2.row_dimensions[current_row].height = 50
+            current_row += 1
+
+    ws2.column_dimensions['A'].width = 12
+    ws2.column_dimensions['B'].width = 20
+    ws2.column_dimensions['C'].width = 34
+    ws2.column_dimensions['D'].width = 75
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    response = HttpResponse(
+        output.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = 'attachment; filename="Legislacao_Fiscal_Angola_Compendio.xlsx"'
+    return response
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def confronto_export_excel_view(request, analise_id=None):
+    """
+    Gera e faz o download da folha de cálculo Excel (.xlsx) oficial contendo o relatório
+    de confronto e reconciliação entre o Balancete (PGC) e o Modelo 7 da AGT.
+    """
+    from datetime import datetime
+    from django.http import HttpResponse
+    from .confronto_excel import gerar_excel_confronto
+
+    texto = ""
+    empresa_nome = "Empresa"
+    nif = "---"
+    periodo = "---"
+    doc_contab = "Balancete de Verificação (PGC)"
+    doc_agt = "Declaração Modelo 7 da AGT"
+
+    if analise_id:
+        analise = AnaliseIA.objects.select_related(
+            'documento_contabilidade__empresa', 'documento_agt__empresa'
+        ).filter(pk=analise_id).first()
+        if not analise:
+            return Response({'error': 'Análise não encontrada'}, status=status.HTTP_404_NOT_FOUND)
+        texto = analise.resultado or ""
+        doc_c = analise.documento_contabilidade
+        doc_a = analise.documento_agt
+        if doc_c and doc_c.empresa:
+            empresa_nome = doc_c.empresa.nome
+            nif = doc_c.empresa.nif
+            periodo = f"{doc_c.mes:02d}/{doc_c.ano}" if doc_c.mes and doc_c.ano else "---"
+        elif doc_a and doc_a.empresa:
+            empresa_nome = doc_a.empresa.nome
+            nif = doc_a.empresa.nif
+            periodo = f"{doc_a.mes:02d}/{doc_a.ano}" if doc_a.mes and doc_a.ano else "---"
+        if doc_c:
+            doc_contab = doc_c.nome_arquivo
+        if doc_a:
+            doc_agt = doc_a.nome_arquivo
+    else:
+        texto = request.data.get('texto') or request.query_params.get('texto') or ""
+        empresa_nome = request.data.get('empresa_nome') or request.query_params.get('empresa_nome') or empresa_nome
+        nif = request.data.get('nif') or request.query_params.get('nif') or nif
+        periodo = request.data.get('periodo') or request.query_params.get('periodo') or periodo
+        doc_contab = request.data.get('doc_contab') or request.query_params.get('doc_contab') or doc_contab
+        doc_agt = request.data.get('doc_agt') or request.query_params.get('doc_agt') or doc_agt
+
+    if not texto:
+        return Response({'error': 'Texto da análise é obrigatório para gerar o relatório.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    excel_bytes = gerar_excel_confronto(
+        texto_analise=texto,
+        empresa_nome=empresa_nome,
+        nif=nif,
+        periodo=periodo,
+        doc_contab=doc_contab,
+        doc_agt=doc_agt
+    )
+
+    filename = f"Relatorio_Confronto_Fiscal_{nif}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    response = HttpResponse(
+        excel_bytes,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def consolidacao_anual_view(request, empresa_id, ano):
+    """Retorna o confronto consolidado de 12 meses de Modelo 7 com o Balancete Anual de Fecho."""
+    try:
+        resultado = consolidacao_anual.gerar_consolidacao_anual(int(empresa_id), int(ano))
+        return Response(resultado, status=status.HTTP_200_OK)
+    except Empresa.DoesNotExist:
+        return Response({'error': 'Empresa não encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.exception(f"Erro ao gerar consolidação anual: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def consolidacao_anual_exportar_excel_view(request, empresa_id, ano):
+    """Exporta o livro Excel (.xlsx) da consolidação anual dos 12 meses."""
+    try:
+        resultado = consolidacao_anual.gerar_consolidacao_anual(int(empresa_id), int(ano))
+        excel_bytes = consolidacao_anual.gerar_excel_consolidacao_anual(resultado)
+        nif = resultado['empresa']['nif']
+        filename = f"Consolidacao_Anual_Fiscal_{nif}_{ano}.xlsx"
+        response = HttpResponse(
+            excel_bytes,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+    except Empresa.DoesNotExist:
+        return Response({'error': 'Empresa não encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.exception(f"Erro ao exportar Excel da consolidação anual: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+

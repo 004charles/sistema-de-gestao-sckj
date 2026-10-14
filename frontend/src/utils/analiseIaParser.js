@@ -4,6 +4,81 @@
  *
  * Suporta formatos em tabela Markdown, blocos em lista/marcadores e saídas com formatações variadas.
  */
+
+/**
+ * Detecta se uma linha de texto é apenas ruído, decoração ou separador Markdown
+ * (ex: '===', '---', '*====================================*', '--', '*', etc.)
+ */
+export function isLinhaDecorativaOuRuido(str) {
+  if (!str) return true;
+  const limpa = String(str).trim();
+  if (limpa.length === 0) return true;
+
+  // Linhas formadas unicamente por caracteres de separação e pontuação (ex: '===', '---', '*===', '--', '*', '***')
+  if (/^[*=\-_~#: \t|/\\`]+$/.test(limpa)) return true;
+
+  // Linhas de modelo/cabeçalho de tabela Markdown ou instruções do prompt
+  if (limpa.includes('|') && /O que est[áa] no Balancete/i.test(limpa)) return true;
+  if (/^\|?\s*Campo\s*\|\s*O que/i.test(limpa)) return true;
+  if (/^\|?\s*Nome do Campo\s*\|/i.test(limpa)) return true;
+  if (/^Para cada diferen[çc]a:?/i.test(limpa)) return true;
+  if (/^\[Nome do Campo\]/i.test(limpa)) return true;
+  if (/^\[valor/i.test(limpa)) return true;
+
+  return false;
+}
+
+/**
+ * Valida se um título de divergência corresponde a uma rubrica ou conta real
+ */
+export function isTituloDiferencaValido(str) {
+  if (!str || isLinhaDecorativaOuRuido(str)) return false;
+  const limpo = String(str).replace(/[*=\-_~#: \t|]/g, '').trim();
+  // Deve conter pelo menos 3 caracteres alfabéticos reais
+  if (!/[a-zA-ZÀ-ÿ]{3,}/.test(limpo)) return false;
+  // Não pode ser cabeçalho de seção
+  if (/^AN[ÁA]LISE/i.test(limpo) || /^PONTOS IGUAIS/i.test(limpo) || /^RESUMO/i.test(limpo) || /^DETALHE/i.test(limpo)) return false;
+  // Se expressar ausência de divergência
+  if (/sem diferen[çc]a|nenhuma diferen[çc]a|sem diverg[êe]ncia|nenhuma diverg[êe]ncia|em perfeita conformidade/i.test(str)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Limpa marcadores de tópicos (- ou * ou •) e asteriscos, preservando o texto substantivo
+ */
+export function sanitizarLinhaTopico(str) {
+  if (!str) return '';
+  let limpo = String(str).trim();
+  if (isLinhaDecorativaOuRuido(limpo)) return '';
+  limpo = limpo.replace(/^[-*•\s]+/, '').replace(/\*\*/g, '').trim();
+  if (isLinhaDecorativaOuRuido(limpo)) return '';
+  return limpo;
+}
+
+/**
+ * Extrai o valor limpo de um campo rotulado (ex: '- **O que está no Balancete:** 500.000 Kz')
+ */
+export function extrairValorRotulado(str) {
+  if (!str) return '';
+  let limpo = String(str).trim();
+  if (isLinhaDecorativaOuRuido(limpo)) return '';
+  limpo = limpo.replace(/^[-*•\s]+/, '').trim();
+  // Remove rótulo até o ':' (incluindo negritos e variações)
+  limpo = limpo.replace(/^(?:\*\*)?[^*:\n]+(?::\*\*|\*\*:\s*|\*\*\s*:\s*|:\s*)\s*/i, '').trim();
+  limpo = limpo.replace(/\*\*/g, '').trim();
+  if (isLinhaDecorativaOuRuido(limpo)) return '';
+  return limpo;
+}
+
+/**
+ * Alias compatível com versões anteriores
+ */
+export function sanitizarValorTexto(str) {
+  return extrairValorRotulado(str);
+}
+
 export function parseAnaliseIA(texto) {
   if (!texto || typeof texto !== 'string') return null;
 
@@ -154,9 +229,9 @@ export function parseAnaliseIA(texto) {
       const pIguaisEncontrados = parteIguais
         .split('\n')
         .map((l) => l.trim())
-        .filter((l) => l.startsWith('-') || l.startsWith('*'))
-        .map((l) => l.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').trim())
-        .filter(Boolean);
+        .filter((l) => !isLinhaDecorativaOuRuido(l))
+        .map((l) => sanitizarLinhaTopico(l))
+        .filter((l) => l.length > 2 && /[a-zA-ZÀ-ÿ0-9]/.test(l) && !isLinhaDecorativaOuRuido(l));
       pontosIguais.push(...pIguaisEncontrados);
     }
 
@@ -169,17 +244,22 @@ export function parseAnaliseIA(texto) {
       .split(/\n(?=(?:[-*]\s*)?(?:\*\*Ponto(?:s)? de diferen[çc]a\*\*:?|\*\*[^*]+(?:\s*[–-]\s*[^*]+)?\*\*))/i);
 
     for (const b of blocosDifs) {
-      const lines = b.split('\n').map((l) => l.trim()).filter(Boolean);
+      const lines = b
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !isLinhaDecorativaOuRuido(l));
       if (lines.length === 0) continue;
 
       const firstLine = lines[0];
-      if (!firstLine.includes('**') || firstLine.startsWith('===')) continue;
+      if (isLinhaDecorativaOuRuido(firstLine)) continue;
 
       const titulo = firstLine
-        .replace(/^[-*]\s*/, '')
+        .replace(/^[-*•\s]+/, '')
         .replace(/\*\*Ponto(?:s)? de diferen[çc]a\*\*:?/i, '')
         .replace(/\*\*/g, '')
         .trim();
+
+      if (!isTituloDiferencaValido(titulo)) continue;
 
       let balancete = '';
       let agt = '';
@@ -189,24 +269,32 @@ export function parseAnaliseIA(texto) {
 
       for (let i = 1; i < lines.length; i++) {
         const line = lines[i];
+        if (isLinhaDecorativaOuRuido(line)) continue;
+
         if (/O que est[áa] no Balancete/i.test(line)) {
-          balancete = line.replace(/^[-*]\s*/, '').replace(/\*\*[^*]+\*\*:\s*/i, '').trim();
+          if (line.includes('|')) continue;
+          balancete = extrairValorRotulado(line);
           currentMode = 'balancete';
         } else if (/O que foi declarado no Modelo/i.test(line)) {
-          agt = line.replace(/^[-*]\s*/, '').replace(/\*\*[^*]+\*\*:\s*/i, '').trim();
+          if (line.includes('|')) continue;
+          agt = extrairValorRotulado(line);
           currentMode = 'agt';
         } else if (/Causa prov[áa]vel/i.test(line)) {
-          const direct = line.replace(/^[-*]\s*/, '').replace(/\*\*[^*]+\*\*:\s*/i, '').trim();
-          if (direct) causas.push(direct);
+          if (line.includes('|')) continue;
+          const direct = extrairValorRotulado(line);
+          if (direct && !isLinhaDecorativaOuRuido(direct)) causas.push(direct);
           currentMode = 'causa';
         } else if (/Risco fiscal/i.test(line)) {
-          const direct = line.replace(/^[-*]\s*/, '').replace(/\*\*[^*]+\*\*:\s*/i, '').trim();
-          if (direct) riscos.push(direct);
+          if (line.includes('|')) continue;
+          const direct = extrairValorRotulado(line);
+          if (direct && !isLinhaDecorativaOuRuido(direct)) riscos.push(direct);
           currentMode = 'risco';
-        } else if (line.startsWith('-') || line.startsWith('*')) {
-          const sub = line.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').trim();
-          if (currentMode === 'causa') causas.push(sub);
-          else if (currentMode === 'risco') riscos.push(sub);
+        } else if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
+          const sub = sanitizarLinhaTopico(line);
+          if (sub && !isLinhaDecorativaOuRuido(sub)) {
+            if (currentMode === 'causa') causas.push(sub);
+            else if (currentMode === 'risco') riscos.push(sub);
+          }
         }
       }
 
@@ -214,6 +302,14 @@ export function parseAnaliseIA(texto) {
         diferencasDetalhadas.push({ titulo, balancete, agt, causas, riscos });
       }
     }
+  }
+
+  // Validação de consistência:
+  // Se o resumo declarou explicitamente 0 diferenças e a tabela de confronto tem 0 diferenças,
+  // descartar qualquer falso positivo capturado por ruído de formatação.
+  const totalDifsTabela = itensConfronto.filter((i) => i.status === 'DIFERENÇA').length;
+  if (diferencasCount === 0 && totalDifsTabela === 0) {
+    diferencasDetalhadas.length = 0;
   }
 
   // Fallbacks inteligentes para garantir que a interface NUNCA fique vazia
@@ -224,7 +320,7 @@ export function parseAnaliseIA(texto) {
     }
   }
 
-  if (diferencasDetalhadas.length === 0 && itensConfronto.length > 0) {
+  if (diferencasDetalhadas.length === 0 && totalDifsTabela > 0) {
     const divergentes = itensConfronto.filter((i) => i.status === 'DIFERENÇA');
     for (const d of divergentes) {
       diferencasDetalhadas.push({
@@ -237,56 +333,125 @@ export function parseAnaliseIA(texto) {
     }
   }
 
-  // 7. Parse da Seção 4: Recomendações
+  // 7. Parse da Seção 4: Recomendações e Resultado Esperado
   const recomendacoesLista = [];
-  const recLines = recomendacoesTexto.split('\n');
-  let currentRec = null;
+  let resultadoEsperado = [];
 
-  for (const line of recLines) {
-    const trimmed = line.trim();
-    const numMatch = trimmed.match(/^(\d+)[.)]\s*(.*)/);
-    if (numMatch) {
-      if (currentRec) recomendacoesLista.push(currentRec);
-      const titleRaw = numMatch[2].replace(/\*\*/g, '').trim();
-      currentRec = {
-        numero: parseInt(numMatch[1], 10),
-        titulo: titleRaw,
-        detalhes: [],
-      };
-    } else if (currentRec && (trimmed.startsWith('-') || trimmed.startsWith('*'))) {
-      const detail = trimmed.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').trim();
-      if (detail) currentRec.detalhes.push(detail);
-    } else if (
-      currentRec &&
-      trimmed &&
-      !trimmed.startsWith('**Resultado esperado**') &&
-      !trimmed.startsWith('---') &&
-      !trimmed.startsWith('4 -') &&
-      !trimmed.startsWith('====')
-    ) {
-      if (currentRec.detalhes.length === 0 && !trimmed.toLowerCase().includes('assim, a empresa')) {
-        currentRec.detalhes.push(trimmed.replace(/\*\*/g, ''));
+  if (recomendacoesTexto) {
+    // Remover o cabeçalho "4. O QUE FAZER PARA RESOLVER"
+    const textoSemTitulo = recomendacoesTexto
+      .replace(/^[=\s\w\d-–.:]*(?:O QUE FAZER|RECOMENDA[ÇC][ÕO]ES)[^\n]*\n+/i, '');
+
+    // Isolar o bloco "Resultado esperado" para não se misturar com as ações recomendadas
+    const partesRec = textoSemTitulo.split(/(?:\*\*Resultado esperado\*\*|Resultado esperado:?)/i);
+    const parteAcoes = partesRec[0] || '';
+    const parteResultado = partesRec[1] || '';
+
+    const recLines = parteAcoes.split('\n');
+    let currentRec = null;
+
+    for (const line of recLines) {
+      const trimmed = line.trim();
+      if (isLinhaDecorativaOuRuido(trimmed)) continue;
+
+      const numMatch = trimmed.match(/^(\d+)[.)]\s*(.*)/);
+      if (numMatch) {
+        const titleRaw = sanitizarLinhaTopico(numMatch[2]);
+        if (titleRaw && !isLinhaDecorativaOuRuido(titleRaw)) {
+          if (currentRec) recomendacoesLista.push(currentRec);
+          currentRec = {
+            numero: parseInt(numMatch[1], 10),
+            titulo: titleRaw,
+            detalhes: [],
+          };
+        }
+      } else if (currentRec && (trimmed.startsWith('-') || trimmed.startsWith('*') || trimmed.startsWith('•'))) {
+        const detail = sanitizarLinhaTopico(trimmed);
+        if (detail && !isLinhaDecorativaOuRuido(detail)) currentRec.detalhes.push(detail);
+      } else if (
+        currentRec &&
+        trimmed &&
+        !isLinhaDecorativaOuRuido(trimmed) &&
+        !trimmed.startsWith('4 -') &&
+        !trimmed.startsWith('4.')
+      ) {
+        const detail = sanitizarLinhaTopico(trimmed);
+        if (detail && !isLinhaDecorativaOuRuido(detail) && currentRec.detalhes.length === 0 && !trimmed.toLowerCase().includes('assim, a empresa')) {
+          currentRec.detalhes.push(detail);
+        }
+      }
+    }
+    if (currentRec) recomendacoesLista.push(currentRec);
+
+    // 8. Resultado Esperado
+    if (parteResultado) {
+      resultadoEsperado = parteResultado
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => !isLinhaDecorativaOuRuido(l))
+        .map((l) => sanitizarLinhaTopico(l))
+        .filter((l) => l.length > 2 && !isLinhaDecorativaOuRuido(l));
+    } else {
+      const conclusaoMatch = textoSemTitulo.match(/(?:Assim,\s*a empresa[\s\S]*?)(?=$)/i);
+      if (conclusaoMatch) {
+        resultadoEsperado = [conclusaoMatch[0].replace(/\n+/g, ' ').trim()];
       }
     }
   }
-  if (currentRec) recomendacoesLista.push(currentRec);
 
-  // 8. Resultado Esperado
-  const resEspMatch = recomendacoesTexto.match(/\*\*Resultado esperado\*\*:\s*([\s\S]*?)(?:---|$)/i);
-  let resultadoEsperado = [];
-  if (resEspMatch) {
-    resultadoEsperado = resEspMatch[1]
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('-') || l.startsWith('*'))
-      .map((l) => l.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').trim())
-      .filter(Boolean);
-  } else {
-    const conclusaoMatch = recomendacoesTexto.match(/(?:Assim,\s*a empresa[\s\S]*?)(?=$)/i);
-    if (conclusaoMatch) {
-      resultadoEsperado = [conclusaoMatch[0].replace(/\n+/g, ' ').trim()];
-    }
-  }
+  // 9. Quadro Oficial de Apuramento do IVA (Lei n.º 7/19 - Código do IVA)
+  // Regra Legal Obrigatória: IVA a Pagar = IVA Liquidado (Conta 3453) - IVA Dedutível (Conta 3451)
+  const itemLiquidado = itensConfronto.find((i) =>
+    i.campo.toLowerCase().includes('liquidado') ||
+    i.campo.toLowerCase().includes('favor do estado')
+  );
+  const itemDedutivel = itensConfronto.find((i) =>
+    i.campo.toLowerCase().includes('dedut') ||
+    i.campo.toLowerCase().includes('suportado') ||
+    i.campo.toLowerCase().includes('favor do sujeito passivo')
+  );
+  const itemPagar = itensConfronto.find((i) =>
+    (i.campo.toLowerCase().includes('pagar') || i.campo.toLowerCase().includes('apurado')) &&
+    !i.campo.toLowerCase().includes('crédito') &&
+    !i.campo.toLowerCase().includes('recuperar')
+  );
+  const itemRecuperar = itensConfronto.find((i) =>
+    i.campo.toLowerCase().includes('recuperar') ||
+    i.campo.toLowerCase().includes('crédito de iva') ||
+    i.campo.toLowerCase().includes('crédito fiscal')
+  );
+
+  const apuramentoIva = (itemLiquidado || itemDedutivel || itemPagar)
+    ? {
+        liquidado: {
+          contabilidade: itemLiquidado?.contabilidade || '0,00 Kz',
+          agt: itemLiquidado?.agt || '0,00 Kz',
+          status: itemLiquidado?.status || 'IGUAIS',
+          diferenca: itemLiquidado?.diferenca || '0,00 Kz',
+        },
+        dedutivel: {
+          contabilidade: itemDedutivel?.contabilidade || '0,00 Kz',
+          agt: itemDedutivel?.agt || '0,00 Kz',
+          status: itemDedutivel?.status || 'IGUAIS',
+          diferenca: itemDedutivel?.diferenca || '0,00 Kz',
+        },
+        pagar: {
+          contabilidade: itemPagar?.contabilidade || '0,00 Kz',
+          agt: itemPagar?.agt || '0,00 Kz',
+          status: itemPagar?.status || 'IGUAIS',
+          diferenca: itemPagar?.diferenca || '0,00 Kz',
+        },
+        recuperar: itemRecuperar
+          ? {
+              contabilidade: itemRecuperar.contabilidade,
+              agt: itemRecuperar.agt,
+              status: itemRecuperar.status,
+              diferenca: itemRecuperar.diferenca,
+            }
+          : null,
+        formula: 'IVA a Pagar = IVA Liquidado (Vendas) - IVA Dedutível (Compras)',
+      }
+    : null;
 
   return {
     totalPontos: total,
@@ -294,6 +459,7 @@ export function parseAnaliseIA(texto) {
     diferencasCount: diferencasCount,
     documentosConfrontados: documentosConfrontados,
     itensConfronto: itensConfronto,
+    apuramentoIva: apuramentoIva,
     observacao: observacao,
     diferencasDetalhadas: diferencasDetalhadas,
     pontosIguais: pontosIguais,

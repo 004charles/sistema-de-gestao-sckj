@@ -1,55 +1,69 @@
+export const adminMenuItems = [
+  {
+    key: 'admin',
+    textKey: 'navigation.admin',
+    fallbackText: 'Administração',
+    text: 'Administração',
+    icon: 'la la-shield-alt',
+    path: '/admin-gestao',
+  },
+];
+
 export const mainMenuItems = [
   {
-    key: 'dashboard',
-    textKey: 'navigation.dashboard',
-    fallbackText: 'Painel de Confronto',
-    text: 'Painel de Confronto',
+    key: 'confronto',
+    textKey: 'navigation.confronto',
+    fallbackText: 'Confronto Contabilidade vs AGT',
+    text: 'Confronto Contabilidade vs AGT',
     icon: 'la la-balance-scale',
-    path: '/dashboard',
+    path: '/confronto',
   },
   {
-    key: 'reports',
-    textKey: 'navigation.reports',
-    fallbackText: 'Pareceres & Relatórios',
-    text: 'Pareceres & Relatórios',
-    icon: 'la la-file-invoice',
-    path: '/relatorios',
-  },
-  {
-    key: 'companies',
-    textKey: 'navigation.companies',
-    fallbackText: 'Empresas',
-    text: 'Empresas',
-    icon: 'la la-building',
-    path: '/empresas',
-  },
-  {
-    key: 'motors',
-    textKey: 'navigation.motors',
-    fallbackText: 'Motores de Auditoria',
-    text: 'Motores de Auditoria',
-    icon: 'la la-shield-alt',
-    path: '/motores',
-  },
-];
-
-export const bottomMenuItems = [
-  {
-    key: 'documents',
-    textKey: 'navigation.documents',
-    fallbackText: 'Arquivo de Documentos',
-    text: 'Arquivo de Documentos',
+    key: 'arquivo',
+    textKey: 'navigation.arquivo',
+    fallbackText: 'Documentos & Arquivo',
+    text: 'Documentos & Arquivo',
     icon: 'la la-folder-open',
-    path: '/documentos',
+    path: '/arquivo',
   },
   {
-    key: 'settings',
-    textKey: 'navigation.settings',
-    fallbackText: 'Configurações',
-    text: 'Configurações',
+    key: 'pgc',
+    textKey: 'navigation.pgc',
+    fallbackText: 'Plano de Contas (PGC)',
+    text: 'Plano de Contas (PGC)',
+    icon: 'la la-book',
+    path: '/pgc',
+  },
+  {
+    key: 'legislacao',
+    textKey: 'navigation.legislacao',
+    fallbackText: 'Legislação Fiscal',
+    text: 'Legislação Fiscal',
+    icon: 'la la-landmark',
+    path: '/legislacao',
+  },
+  {
+    key: 'empresas',
+    textKey: 'navigation.empresas',
+    fallbackText: 'Empresas & Clientes',
+    text: 'Empresas & Clientes',
+    icon: 'la la-building',
+    path: '/admin-gestao?aba=empresas',
+  },
+  {
+    key: 'definicoes',
+    textKey: 'navigation.definicoes',
+    fallbackText: 'Definições da Empresa',
+    text: 'Definições da Empresa',
     icon: 'la la-cog',
-    path: '/configuracoes',
+    path: '/definicoes',
   },
 ];
 
-export const menuItems = [...mainMenuItems, ...bottomMenuItems];
+export const workflowMenuItems = [];
+export const referenceMenuItems = [];
+
+export const menuItems = [...adminMenuItems, ...mainMenuItems];
+
+
+

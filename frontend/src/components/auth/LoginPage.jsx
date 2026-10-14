@@ -35,7 +35,8 @@ const LoginPage = ({ onLogin }) => {
     try {
       const response = await authService.login(formData.username, formData.password);
       if (response.data.success) {
-        localStorage.setItem('user', JSON.stringify(response.data.user));
+        const userData = response.data.user;
+        localStorage.setItem('user', JSON.stringify(userData));
         if (rememberMe) {
           localStorage.setItem('rememberedUser', formData.username);
         } else {
@@ -43,7 +44,11 @@ const LoginPage = ({ onLogin }) => {
         }
         toast.success(t('login.success'));
         onLogin();
-        navigate('/home');
+        if (userData?.is_admin || userData?.is_superuser || userData?.is_staff) {
+          navigate('/admin-gestao');
+        } else {
+          navigate('/auditoria');
+        }
       }
     } catch (err) {
       setError(

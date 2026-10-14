@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { empresaService } from '../services/api';
 
 const CHAVE = 'periodoAuditoria';
 
@@ -24,6 +25,42 @@ export const PeriodoProvider = ({ children }) => {
     }
     return base;
   });
+
+  const [empresas, setEmpresas] = useState([]);
+  const [carregandoEmpresas, setCarregandoEmpresas] = useState(false);
+
+  const carregarEmpresas = useCallback(async () => {
+    const user = localStorage.getItem('user');
+    if (!user) return [];
+    setCarregandoEmpresas(true);
+    try {
+      const res = await empresaService.getAll();
+      const lista = Array.isArray(res.data) ? res.data : res.data?.results || [];
+      setEmpresas(lista);
+      if (lista.length > 0) {
+        setPeriodo((atual) => {
+          const existe = lista.some((e) => String(e.id) === String(atual.empresaId));
+          if (!existe) {
+            const sckj = lista.find((e) => e.nif === '5002830280');
+            return { ...atual, empresaId: String(sckj ? sckj.id : lista[0].id) };
+          }
+          return atual;
+        });
+      } else {
+        setPeriodo((atual) => ({ ...atual, empresaId: '' }));
+      }
+      return lista;
+    } catch (err) {
+      console.warn('Erro ao carregar empresas no contexto:', err);
+      return [];
+    } finally {
+      setCarregandoEmpresas(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    carregarEmpresas();
+  }, [carregarEmpresas]);
 
   useEffect(() => {
     try {
@@ -51,9 +88,19 @@ export const PeriodoProvider = ({ children }) => {
     });
   }, []);
 
+  const empresaAtual = empresas.find((e) => String(e.id) === String(periodo.empresaId)) || null;
+
   const valor = React.useMemo(
-    () => ({ ...periodo, atualizar, escolherSeAusente }),
-    [periodo, atualizar, escolherSeAusente]
+    () => ({
+      ...periodo,
+      empresas,
+      empresaAtual,
+      carregandoEmpresas,
+      carregarEmpresas,
+      atualizar,
+      escolherSeAusente,
+    }),
+    [periodo, empresas, empresaAtual, carregandoEmpresas, carregarEmpresas, atualizar, escolherSeAusente]
   );
 
   return <PeriodoContext.Provider value={valor}>{children}</PeriodoContext.Provider>;
