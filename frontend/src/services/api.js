@@ -210,4 +210,17 @@ export const consolidacaoService = {
     api.get(`/consolidacao-anual/${empresaId}/${ano}/exportar-excel/`, { responseType: 'blob' }),
 };
 
+export const facturaService = {
+  scanFactura: (formData) =>
+    api.post('/facturas/scan/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  listar: (params = {}) => api.get('/facturas/', { params }),
+  lancarNoDiario: (facturaId) => api.post(`/facturas/${facturaId}/lancar/`),
+  excluir: (facturaId) => api.delete(`/facturas/${facturaId}/`),
+  exportarExcel: (params = {}) =>
+    api.get('/facturas/exportar-excel/', { params, responseType: 'blob' }),
+};
+
 export default api;
+

@@ -7,6 +7,7 @@ import LoginPage from './components/auth/LoginPage';
 import MainLayout from './components/common/MainLayout';
 import Documentos from './pages/Documentos';
 import Confronto from './pages/Confronto';
+import Facturas from './pages/Facturas';
 import Pgc from './pages/Pgc';
 import Legislacao from './pages/Legislacao';
 import Definicoes from './pages/Definicoes';
@@ -103,11 +104,15 @@ function App() {
             {/* Gestão Contabilística & Fiscal */}
             <Route path="/arquivo" element={<Pagina><Documentos /></Pagina>} />
             <Route path="/confronto" element={<Pagina><Confronto /></Pagina>} />
+            <Route path="/facturas" element={<Pagina><Facturas /></Pagina>} />
             <Route path="/pgc" element={<Pagina><Pgc /></Pagina>} />
             <Route path="/legislacao" element={<Pagina><Legislacao /></Pagina>} />
             <Route path="/definicoes" element={<Pagina><Definicoes /></Pagina>} />
 
             {/* Redirecionamentos de rotas e aliases */}
+            <Route path="/faturas" element={<Navigate to="/facturas" replace />} />
+            <Route path="/scanner" element={<Navigate to="/facturas" replace />} />
+            <Route path="/leitor" element={<Navigate to="/facturas" replace />} />
             <Route path="/reconciliacao" element={<Navigate to="/confronto" replace />} />
             <Route path="/analise" element={<Navigate to="/confronto" replace />} />
             <Route path="/historico" element={<Navigate to="/confronto" replace />} />

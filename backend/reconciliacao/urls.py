@@ -72,5 +72,11 @@ urlpatterns = [
     path('taxas/', views.taxas_view, name='taxas'),
     path('regras/', views.listar_regras_view, name='listar-regras'),
     path('regras/<int:regra_id>/', views.validar_regra_view, name='validar-regra'),
+    path('facturas/scan/', views.scan_factura_view, name='facturas-scan'),
+    path('facturas/', views.listar_facturas_view, name='facturas-listar'),
+    path('facturas/<int:factura_id>/lancar/', views.lancar_factura_contabilidade_view, name='facturas-lancar'),
+    path('facturas/<int:factura_id>/', views.deletar_factura_view, name='facturas-deletar'),
+    path('facturas/exportar-excel/', views.exportar_facturas_excel_view, name='facturas-exportar-excel'),
     path('', include(router.urls)),
 ]
+

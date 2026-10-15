@@ -902,3 +902,197 @@ class LinhaLancamento(models.Model):
         natureza = f"D: {self.debito}" if self.debito > 0 else f"C: {self.credito}"
         return f"{self.conta_codigo} - {self.conta_nome} | {natureza}"
 
+
+class Factura(models.Model):
+    """
+    Registo estruturado de Facturas de Fornecedor ou Cliente processadas pelo Scanner com IA.
+    Em conformidade com as regras fiscais de Angola (AGT, CIVA, PGC).
+    """
+    TIPO_DOC_CHOICES = [
+        ('FT', 'Factura'),
+        ('FR', 'Factura-Recibo'),
+        ('FS', 'Factura Simplificada'),
+        ('NC', 'Nota de Crédito'),
+        ('ND', 'Nota de Débito'),
+    ]
+
+    TIPO_OPERACAO_CHOICES = [
+        ('COMPRA', 'Compra / Fornecedor'),
+        ('VENDA', 'Venda / Cliente'),
+    ]
+
+    CONFORMIDADE_CHOICES = [
+        ('CONFORME', 'Conforme AGT'),
+        ('AVISO', 'Aviso / Verificação'),
+        ('IRREGULAR', 'Irregular perante AGT'),
+    ]
+
+    empresa = models.ForeignKey(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name='facturas',
+        help_text='Empresa titular da fatura (adquirente ou emitente).'
+    )
+    documento = models.ForeignKey(
+        DocumentoUpload,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='facturas_extraidas',
+        help_text='Ficheiro digital ou PDF original associado.'
+    )
+    tipo_documento = models.CharField(
+        max_length=10,
+        choices=TIPO_DOC_CHOICES,
+        default='FT',
+        help_text='Tipo de documento fiscal (FT, FR, FS, NC, ND).'
+    )
+    tipo_operacao = models.CharField(
+        max_length=10,
+        choices=TIPO_OPERACAO_CHOICES,
+        default='COMPRA',
+        help_text='Indica se é fatura de fornecedor (compra) ou venda.'
+    )
+    numero_factura = models.CharField(
+        max_length=80,
+        help_text='Número oficial da fatura (ex: FT 2026/00142 ou FT FA/001).'
+    )
+    data_emissao = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Data de emissão constante da fatura.'
+    )
+    data_vencimento = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Data de vencimento do pagamento.'
+    )
+    ano = models.IntegerField(null=True, blank=True)
+    mes = models.IntegerField(null=True, blank=True)
+
+    # Dados do Terceiro / Fornecedor
+    fornecedor_nome = models.CharField(max_length=200, blank=True, default='')
+    fornecedor_nif = models.CharField(max_length=30, blank=True, default='')
+    fornecedor_endereco = models.CharField(max_length=255, blank=True, default='')
+
+    # Dados do Adquirente / Cliente
+    cliente_nome = models.CharField(max_length=200, blank=True, default='')
+    cliente_nif = models.CharField(max_length=30, blank=True, default='')
+
+    # Valores Financeiros e Fiscais (Kz)
+    base_incidencia = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Valor base sujeito a incidência de IVA.'
+    )
+    taxa_iva = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal('14.00'),
+        help_text='Taxa de IVA aplicada (14%, 5%, 0% - isento).'
+    )
+    valor_iva = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Montante total do IVA liquidado/suportado.'
+    )
+    motivo_isencao_iva = models.CharField(
+        max_length=200, blank=True, default='',
+        help_text='Código de isenção AGT se taxa 0% (ex: M02 - Artigo 12.º do CIVA).'
+    )
+    retencao_iva = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Retenção na fonte de IVA (7% - Dec. Presidencial 180/19).'
+    )
+    retencao_ii = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Retenção na fonte de Imposto Industrial (6.5%).'
+    )
+    valor_total = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Valor total bruto da fatura (Base + IVA).'
+    )
+    valor_liquido = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'),
+        help_text='Valor líquido a pagar pelo adquirente (Total - Retenções).'
+    )
+
+    # Auditoria e Conformidade AGT
+    software_certificacao = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='Menção legal de software certificado pela AGT (ex: Processado por programa certificado nº X/AGT).'
+    )
+    hash_agt = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text='Hash de 4 caracteres da assinatura digital fiscal.'
+    )
+    iva_dedutivel = models.BooleanField(
+        default=True,
+        help_text='Indica se o IVA é legalmente dedutível perante o CIVA (arts. 19º e 20º).'
+    )
+    motivo_nao_dedutivel = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text='Fundamentação legal em caso de exclusão do direito à dedução.'
+    )
+    conformidade_agt = models.CharField(
+        max_length=20,
+        choices=CONFORMIDADE_CHOICES,
+        default='CONFORME',
+        help_text='Estado de conformidade fiscal e requisitos legais da AGT.'
+    )
+    alertas_auditoria = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Lista de alertas detetados pela IA e validações fiscais.'
+    )
+
+    # Classificação Contabilística Sugerida (PGC Angola)
+    conta_custo_sugerida = models.CharField(
+        max_length=40, blank=True, default='62.2',
+        help_text='Código da conta de custo/gastos ou compras no PGC.'
+    )
+    conta_custo_nome = models.CharField(
+        max_length=150, blank=True, default='Fornecimentos e Serviços de Terceiros'
+    )
+    conta_terceiro_sugerida = models.CharField(
+        max_length=40, blank=True, default='32.1.1',
+        help_text='Conta de Terceiros / Fornecedores no PGC.'
+    )
+    conta_terceiro_nome = models.CharField(
+        max_length=150, blank=True, default='Fornecedores Nacionais - Correntes'
+    )
+    conta_iva_sugerida = models.CharField(
+        max_length=40, blank=True, default='34.5.2',
+        help_text='Conta de IVA Suportado Operações Gerais no PGC.'
+    )
+    conta_iva_nome = models.CharField(
+        max_length=150, blank=True, default='IVA Suportado - Operações Gerais'
+    )
+
+    # Integração com Escrituração / Lançamento
+    lancado_na_contabilidade = models.BooleanField(
+        default=False,
+        help_text='Indica se já foi gerado lançamento contabilístico no diário.'
+    )
+    lancamento = models.ForeignKey(
+        LancamentoContabilistico,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='facturas_origem',
+        help_text='Lançamento no Livro Diário gerado a partir desta fatura.'
+    )
+
+    itens_detalhe = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Linhas de produtos e serviços extraídas da fatura.'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'contabilidade_factura'
+        ordering = ['-data_emissao', '-created_at']
+
+    def __str__(self):
+        fornecedor = self.fornecedor_nome or self.fornecedor_nif or 'Fornecedor Desconhecido'
+        return f"{self.tipo_documento} {self.numero_factura} - {fornecedor} ({self.valor_total} Kz)"
+
+

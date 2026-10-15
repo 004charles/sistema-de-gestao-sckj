@@ -199,18 +199,20 @@ const AdminHeader = ({ onToggleSidebar, estatisticas }) => {
               <div className={`dropdown-custom ${openMenu === 'lang' ? 'show' : ''}`}>
                 <a
                   href="#language"
-                  className="nav-item-toggle d-flex align-items-center"
+                  className="nav-item-toggle d-flex align-items-center justify-content-center"
                   onClick={(e) => {
                     e.preventDefault();
                     setOpenMenu(openMenu === 'lang' ? null : 'lang');
                   }}
                   title={currentLang.label}
+                  style={{ width: 34, height: 34, flexShrink: 0 }}
                 >
                   <img
                     src={currentLang.flag}
-                    alt={currentLang.label}
+                    alt=""
+                    aria-label={currentLang.label}
                     className="rounded-circle"
-                    style={{ width: 22, height: 22, objectFit: 'cover' }}
+                    style={{ width: 22, height: 22, minWidth: 22, minHeight: 22, objectFit: 'cover', flexShrink: 0 }}
                   />
                 </a>
                 <div className="dropdown-wrapper dropdown-wrapper--small">
@@ -242,11 +244,12 @@ const AdminHeader = ({ onToggleSidebar, estatisticas }) => {
               <div className={`dropdown-custom ${openMenu === 'author' ? 'show' : ''}`}>
                 <a
                   href="#author"
-                  className="nav-item-toggle"
+                  className="nav-item-toggle d-flex align-items-center justify-content-center"
                   onClick={(e) => {
                     e.preventDefault();
                     setOpenMenu(openMenu === 'author' ? null : 'author');
                   }}
+                  style={{ width: 34, height: 34, flexShrink: 0 }}
                 >
                   <span className="author-initials">{initial}</span>
                 </a>

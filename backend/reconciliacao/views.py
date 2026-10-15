@@ -18,7 +18,8 @@ from .models import (
     Empresa, EmpresaUtilizador, Contabilidade, DeclaracaoAGT,
     Reconciliacao, ReconciliacaoDetalhe, MapeamentoConta,
     DocumentoUpload, AnaliseIA, Regra, Ocorrencia,
-    RegistroAcessoAdmin, LancamentoContabilistico, LinhaLancamento
+    RegistroAcessoAdmin, LancamentoContabilistico, LinhaLancamento,
+    Factura
 )
 from .serializers import (
     EmpresaSerializer,
@@ -26,7 +27,8 @@ from .serializers import (
     ReconciliacaoSerializer, ReconciliacaoDetalheSerializer,
     MapeamentoContaSerializer, LoginSerializer,
     ReconciliacaoExecutarSerializer,
-    LancamentoContabilisticoSerializer, LinhaLancamentoSerializer
+    LancamentoContabilisticoSerializer, LinhaLancamentoSerializer,
+    FacturaSerializer
 )
 from . import pdf_service
 from . import extracao_service
@@ -42,6 +44,7 @@ from . import auditoria_trace
 from . import ai_auditoria
 from . import consolidacao_anual
 from . import auto_cadastro_service
+from . import factura_ai_service
 
 logger = logging.getLogger('reconciliacao')
 
@@ -2975,6 +2978,412 @@ def consolidacao_anual_exportar_excel_view(request, empresa_id, ano):
     except Exception as e:
         logger.exception(f"Erro ao exportar Excel da consolidação anual: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================================
+# MÓDULO INTELIGENTE: LEITOR / SCANNER DE FACTURAS COM IA & AUDITORIA AGT
+# ============================================================================
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def scan_factura_view(request):
+    """
+    Recebe um ficheiro de fatura (PDF, imagem, texto), processa com IA especializada
+    nas regras fiscais de Angola (AGT/CIVA/PGC), audita e grava na base de dados.
+    """
+    arquivo = request.FILES.get('arquivo')
+    if not arquivo:
+        return Response({'error': 'Ficheiro da fatura não fornecido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    empresa_id = request.data.get('empresa_id') or request.query_params.get('empresa_id')
+    import tempfile
+    import os
+
+    extensao = ('.' + arquivo.name.rsplit('.', 1)[-1].lower() if '.' in arquivo.name else '')
+    with tempfile.NamedTemporaryFile(suffix=extensao, delete=False) as tmp:
+        for chunk in arquivo.chunks():
+            tmp.write(chunk)
+        tmp_path = tmp.name
+
+    try:
+        empresa_obj = None
+        if empresa_id:
+            empresa_obj = Empresa.objects.filter(pk=empresa_id).first()
+
+        # Arquivar também em DocumentoUpload
+        tipo_upload = 'FACTURA_COMPRA'
+        if 'venda' in arquivo.name.lower() or 'cliente' in arquivo.name.lower():
+            tipo_upload = 'FACTURA_VENDA'
+
+        doc_upload = DocumentoUpload.objects.create(
+            empresa=empresa_obj,
+            arquivo=arquivo,
+            tipo=tipo_upload,
+            tipo_sugerido=tipo_upload,
+            nome_arquivo=arquivo.name,
+            estado='PROCESSADO'
+        )
+
+        factura = factura_ai_service.processar_factura_ficheiro(
+            arquivo_path=tmp_path,
+            nome_arquivo=arquivo.name,
+            empresa_id=empresa_obj.id if empresa_obj else None,
+            doc_upload_id=doc_upload.id
+        )
+
+        # Se o DocumentoUpload não tinha empresa ou período, atualiza agora
+        if not doc_upload.empresa and factura.empresa:
+            doc_upload.empresa = factura.empresa
+        doc_upload.ano = factura.ano
+        doc_upload.mes = factura.mes
+        doc_upload.save(update_fields=['empresa', 'ano', 'mes'])
+
+        serializer = FacturaSerializer(factura)
+        return Response({
+            'success': True,
+            'mensagem': f"Fatura {factura.numero_factura} processada e auditada com sucesso com IA.",
+            'factura': serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        logger.exception(f"Erro ao processar fatura com IA: {e}")
+        return Response({
+            'error': f"Falha ao ler fatura: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def listar_facturas_view(request):
+    """
+    Lista facturas filtradas por empresa, período e conformidade,
+    acompanhadas de métricas fiscais acumuladas para o mapa de IVA.
+    """
+    empresa_id = request.query_params.get('empresa_id')
+    ano = request.query_params.get('ano')
+    mes = request.query_params.get('mes')
+    tipo_operacao = request.query_params.get('tipo_operacao')
+    conformidade = request.query_params.get('conformidade')
+    busca = request.query_params.get('search', '').strip()
+
+    qs = Factura.objects.select_related('empresa', 'documento', 'lancamento').all()
+
+    if empresa_id:
+        qs = qs.filter(empresa_id=empresa_id)
+    if ano:
+        try:
+            qs = qs.filter(ano=int(ano))
+        except ValueError:
+            pass
+    if mes and mes != 'todos':
+        try:
+            qs = qs.filter(mes=int(mes))
+        except ValueError:
+            pass
+    if tipo_operacao:
+        qs = qs.filter(tipo_operacao=tipo_operacao)
+    if conformidade and conformidade != 'todos':
+        qs = qs.filter(conformidade_agt=conformidade)
+    if busca:
+        qs = qs.filter(
+            Q(numero_factura__icontains=busca) |
+            Q(fornecedor_nome__icontains=busca) |
+            Q(fornecedor_nif__icontains=busca) |
+            Q(cliente_nome__icontains=busca) |
+            Q(cliente_nif__icontains=busca)
+        )
+
+    # Estatísticas e Métricas de IVA do lote
+    total_base = Decimal('0.00')
+    total_iva = Decimal('0.00')
+    total_iva_dedutivel = Decimal('0.00')
+    total_retencao_iva = Decimal('0.00')
+    total_retencao_ii = Decimal('0.00')
+    total_bruto = Decimal('0.00')
+    total_liquido = Decimal('0.00')
+    conformes = 0
+    avisos = 0
+    irregulares = 0
+    lancadas = 0
+
+    facturas_list = list(qs)
+    for f in facturas_list:
+        total_base += f.base_incidencia or Decimal('0.00')
+        total_iva += f.valor_iva or Decimal('0.00')
+        if f.iva_dedutivel:
+            total_iva_dedutivel += f.valor_iva or Decimal('0.00')
+        total_retencao_iva += f.retencao_iva or Decimal('0.00')
+        total_retencao_ii += f.retencao_ii or Decimal('0.00')
+        total_bruto += f.valor_total or Decimal('0.00')
+        total_liquido += f.valor_liquido or Decimal('0.00')
+
+        if f.conformidade_agt == 'CONFORME':
+            conformes += 1
+        elif f.conformidade_agt == 'AVISO':
+            avisos += 1
+        else:
+            irregulares += 1
+
+        if f.lancado_na_contabilidade:
+            lancadas += 1
+
+    serializer = FacturaSerializer(facturas_list, many=True)
+    return Response({
+        'facturas': serializer.data,
+        'estatisticas': {
+            'total_contagem': len(facturas_list),
+            'total_base': float(total_base),
+            'total_iva_suportado': float(total_iva),
+            'total_iva_dedutivel': float(total_iva_dedutivel),
+            'total_retencao_iva': float(total_retencao_iva),
+            'total_retencao_ii': float(total_retencao_ii),
+            'total_bruto': float(total_bruto),
+            'total_liquido': float(total_liquido),
+            'conformes': conformes,
+            'avisos': avisos,
+            'irregulares': irregulares,
+            'lancadas': lancadas,
+        }
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def lancar_factura_contabilidade_view(request, factura_id):
+    """
+    Converte uma fatura auditada num lançamento oficial em partidas dobradas
+    no Diário de Compras do PGC de Angola com 1 clique.
+    """
+    try:
+        factura = Factura.objects.get(pk=factura_id)
+        user = request.user if getattr(request, 'user', None) and request.user.is_authenticated else None
+        lancamento, criado, mensagem = factura_ai_service.criar_lancamento_contabilistico_da_factura(factura, user=user)
+
+        serializer = FacturaSerializer(factura)
+        return Response({
+            'success': True,
+            'mensagem': mensagem,
+            'lancamento_id': lancamento.id if lancamento else None,
+            'numero_diario': lancamento.numero_diario if lancamento else None,
+            'factura': serializer.data
+        }, status=status.HTTP_200_OK if not criado else status.HTTP_201_CREATED)
+    except Factura.DoesNotExist:
+        return Response({'error': 'Fatura não encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.exception(f"Erro ao lançar fatura no diário: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+@permission_classes([AllowAny])
+def deletar_factura_view(request, factura_id):
+    """Elimina o registo da fatura da base de dados."""
+    try:
+        factura = Factura.objects.get(pk=factura_id)
+        numero = factura.numero_factura
+        factura.delete()
+        return Response({'success': True, 'mensagem': f"Fatura {numero} eliminada com sucesso."})
+    except Factura.DoesNotExist:
+        return Response({'error': 'Fatura não encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def exportar_facturas_excel_view(request):
+    """
+    Gera o Mapa de Fornecedores / Aquisições da AGT em formato Excel (.xlsx).
+    Elemento oficial exigido como anexo à Declaração Periódica de IVA (Modelo 7).
+    """
+    empresa_id = request.query_params.get('empresa_id')
+    ano = request.query_params.get('ano')
+    mes = request.query_params.get('mes')
+
+    qs = Factura.objects.select_related('empresa').all()
+    if empresa_id:
+        qs = qs.filter(empresa_id=empresa_id)
+    if ano:
+        try:
+            qs = qs.filter(ano=int(ano))
+        except ValueError:
+            pass
+    if mes and mes != 'todos':
+        try:
+            qs = qs.filter(mes=int(mes))
+        except ValueError:
+            pass
+
+    empresa = Empresa.objects.filter(pk=empresa_id).first() if empresa_id else None
+    empresa_nome = empresa.nome if empresa else "Todas as Empresas"
+    empresa_nif = empresa.nif if empresa else "---"
+
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Mapa de Fornecedores AGT"
+    ws.views.sheetView[0].showGridLines = True
+
+    # Estilos
+    cor_azul = "1e3a8a"
+    cor_topo = "0f172a"
+    cor_linha_clara = "f8fafc"
+    cor_borda = "cbd5e1"
+
+    fonte_titulo = Font(name="Calibri", size=15, bold=True, color="ffffff")
+    fonte_sub = Font(name="Calibri", size=10, bold=False, color="e2e8f0")
+    fonte_cabecalho = Font(name="Calibri", size=10, bold=True, color="ffffff")
+    fonte_dados = Font(name="Calibri", size=9.5)
+    fonte_totais = Font(name="Calibri", size=10, bold=True, color="0f172a")
+
+    fill_titulo = PatternFill(start_color=cor_topo, end_color=cor_topo, fill_type="solid")
+    fill_cabecalho = PatternFill(start_color=cor_azul, end_color=cor_azul, fill_type="solid")
+    fill_zebrado = PatternFill(start_color=cor_linha_clara, end_color=cor_linha_clara, fill_type="solid")
+    fill_totais = PatternFill(start_color="e2e8f0", end_color="e2e8f0", fill_type="solid")
+
+    borda_fina = Side(style="thin", color=cor_borda)
+    border_celula = Border(left=borda_fina, right=borda_fina, top=borda_fina, bottom=borda_fina)
+
+    # 1. Cabeçalho Executivo
+    ws.merge_cells("A1:N1")
+    ws["A1"] = "REPÚBLICA DE ANGOLA — ADMINISTRAÇÃO GERAL TRIBUTÁRIA (AGT)"
+    ws["A1"].font = fonte_titulo
+    ws["A1"].fill = fill_titulo
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    ws.merge_cells("A2:N2")
+    ws["A2"] = f"MAPA DE AQUISIÇÕES E FACTURAS DE FORNECEDORES — ANEXO MODELO 7 DO IVA | {empresa_nome} (NIF: {empresa_nif})"
+    ws["A2"].font = fonte_sub
+    ws["A2"].fill = fill_titulo
+    ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 20
+
+    ws.append([])  # Linha 3 vazia
+
+    # 2. Cabeçalhos da Tabela
+    cabecalhos = [
+        "N.º", "Tipo", "N.º Fatura", "Data Emissão", "Fornecedor / Emitente", "NIF Fornecedor",
+        "Base Incidência (Kz)", "Taxa IVA (%)", "IVA Suportado (Kz)", "IVA Dedutível (Kz)",
+        "Retenção 7% IVA", "Retenção 6.5% II", "Total Líquido (Kz)", "Conformidade AGT"
+    ]
+    ws.append(cabecalhos)
+    ws.row_dimensions[4].height = 24
+
+    for col_idx in range(1, len(cabecalhos) + 1):
+        cell = ws.cell(row=4, column=col_idx)
+        cell.font = fonte_cabecalho
+        cell.fill = fill_cabecalho
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border_celula
+
+    # 3. Preenchimento de Linhas
+    linha_atual = 5
+    tot_base = Decimal('0.00')
+    tot_iva = Decimal('0.00')
+    tot_iva_ded = Decimal('0.00')
+    tot_ret_iva = Decimal('0.00')
+    tot_ret_ii = Decimal('0.00')
+    tot_liq = Decimal('0.00')
+
+    for idx, f in enumerate(qs, start=1):
+        tot_base += f.base_incidencia or Decimal('0.00')
+        tot_iva += f.valor_iva or Decimal('0.00')
+        if f.iva_dedutivel:
+            tot_iva_ded += f.valor_iva or Decimal('0.00')
+        tot_ret_iva += f.retencao_iva or Decimal('0.00')
+        tot_ret_ii += f.retencao_ii or Decimal('0.00')
+        tot_liq += f.valor_liquido or Decimal('0.00')
+
+        data_str = f.data_emissao.strftime('%d/%m/%Y') if f.data_emissao else "---"
+
+        row_vals = [
+            idx,
+            f.tipo_documento,
+            f.numero_factura,
+            data_str,
+            f.fornecedor_nome or "---",
+            f.fornecedor_nif or "---",
+            float(f.base_incidencia or 0),
+            float(f.taxa_iva or 0),
+            float(f.valor_iva or 0),
+            float(f.valor_iva or 0) if f.iva_dedutivel else 0.0,
+            float(f.retencao_iva or 0),
+            float(f.retencao_ii or 0),
+            float(f.valor_liquido or 0),
+            f.get_conformidade_agt_display() if hasattr(f, 'get_conformidade_agt_display') else f.conformidade_agt
+        ]
+        ws.append(row_vals)
+        ws.row_dimensions[linha_atual].height = 20
+
+        for col_idx in range(1, len(row_vals) + 1):
+            c = ws.cell(row=linha_atual, column=col_idx)
+            c.font = fonte_dados
+            c.border = border_celula
+            if idx % 2 == 0:
+                c.fill = fill_zebrado
+
+            # Formatações numéricas
+            if col_idx in [1, 2, 4, 14]:
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_idx in [3, 5, 6]:
+                c.alignment = Alignment(horizontal="left", vertical="center")
+            elif col_idx == 8:
+                c.number_format = '0.00"%"'
+                c.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                c.number_format = '#,##0.00'
+                c.alignment = Alignment(horizontal="right", vertical="center")
+
+        linha_atual += 1
+
+    # Linha de Totais Finais
+    totais_vals = [
+        "TOTAIS", "", "", "", "", "",
+        float(tot_base), "", float(tot_iva), float(tot_iva_ded),
+        float(tot_ret_iva), float(tot_ret_ii), float(tot_liq), ""
+    ]
+    ws.append(totais_vals)
+    ws.row_dimensions[linha_atual].height = 24
+    for col_idx in range(1, len(totais_vals) + 1):
+        c = ws.cell(row=linha_atual, column=col_idx)
+        c.font = fonte_totais
+        c.fill = fill_totais
+        c.border = border_celula
+        if col_idx in [7, 9, 10, 11, 12, 13]:
+            c.number_format = '#,##0.00'
+            c.alignment = Alignment(horizontal="right", vertical="center")
+        else:
+            c.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Ajuste de larguras de colunas
+    larguras = {1: 6, 2: 8, 3: 18, 4: 13, 5: 32, 6: 15, 7: 19, 8: 12, 9: 17, 10: 17, 11: 17, 12: 17, 13: 19, 14: 16}
+    for col_i, width in larguras.items():
+        ws.column_dimensions[get_column_letter(col_i)].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    excel_bytes = buffer.getvalue()
+    buffer.close()
+
+    filename = f"Mapa_Fornecedores_AGT_{empresa_nif}_{ano or 'Todos'}.xlsx"
+    response = HttpResponse(
+        excel_bytes,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
 
 
 

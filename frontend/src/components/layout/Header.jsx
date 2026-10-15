@@ -78,7 +78,7 @@ const Header = ({ onToggleSidebar }) => {
               <div className={`dropdown-custom ${openMenu === 'empresa' ? 'show' : ''}`}>
                 <button
                   type="button"
-                  className="nav-item-toggle btn btn-sm d-flex align-items-center"
+                  className="btn-empresa-header btn btn-sm d-flex align-items-center"
                   onClick={(e) => {
                     e.preventDefault();
                     setOpenMenu(openMenu === 'empresa' ? null : 'empresa');
@@ -87,40 +87,46 @@ const Header = ({ onToggleSidebar }) => {
                     background: empresaAtual ? '#f0f4ff' : '#f8f9fb',
                     border: '1px solid ' + (empresaAtual ? '#c7d2fe' : '#e2e8f0'),
                     borderRadius: 20,
-                    padding: '3px 12px',
-                    height: 36,
-                    gap: 8,
+                    padding: '5px 14px',
+                    minHeight: 42,
+                    height: 'auto',
+                    gap: 10,
                     cursor: 'pointer',
+                    flexShrink: 0,
                   }}
                   title={empresaAtual ? `${empresaAtual.nome} (NIF: ${empresaAtual.nif})` : 'Nenhuma empresa selecionada'}
                 >
                   <span
+                    className="empresa-avatar-icon"
                     style={{
-                      width: 22,
-                      height: 22,
+                      width: 26,
+                      height: 26,
+                      minWidth: 26,
+                      minHeight: 26,
                       borderRadius: '50%',
                       background: empresaAtual ? '#4338ca' : '#94a3b8',
                       color: '#fff',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      fontSize: 11,
+                      fontSize: 12,
+                      flexShrink: 0,
                     }}
                   >
                     <i className="la la-building"></i>
                   </span>
-                  <div className="d-flex flex-column text-left" style={{ lineHeight: 1.15 }}>
+                  <div className="d-flex flex-column text-left" style={{ lineHeight: 1.25 }}>
                     <span
                       className="fw-700 text-truncate"
-                      style={{ fontSize: 12, maxWidth: 220, color: empresaAtual ? '#1e1b4b' : '#64748b' }}
+                      style={{ fontSize: 12, maxWidth: 300, color: empresaAtual ? '#1e1b4b' : '#64748b', display: 'block' }}
                     >
                       {empresaAtual ? empresaAtual.nome : 'Sem Empresa Ativa'}
                     </span>
-                    <span className="text-muted" style={{ fontSize: 10 }}>
+                    <span className="text-muted" style={{ fontSize: 10.5, display: 'block' }}>
                       {empresaAtual ? `NIF: ${empresaAtual.nif}` : 'Clique para selecionar'}
                     </span>
                   </div>
-                  <i className="la la-angle-down text-muted ml-4" style={{ fontSize: 11 }}></i>
+                  <i className="la la-angle-down text-muted ml-4" style={{ fontSize: 11, flexShrink: 0 }}></i>
                 </button>
 
                 {empresas && empresas.length > 0 && (
@@ -194,18 +200,20 @@ const Header = ({ onToggleSidebar }) => {
               <div className={`dropdown-custom ${openMenu === 'lang' ? 'show' : ''}`}>
                 <a
                   href="#language"
-                  className="nav-item-toggle d-flex align-items-center"
+                  className="nav-item-toggle d-flex align-items-center justify-content-center"
                   onClick={(e) => {
                     e.preventDefault();
                     setOpenMenu(openMenu === 'lang' ? null : 'lang');
                   }}
                   title={currentLang.label}
+                  style={{ width: 34, height: 34, flexShrink: 0 }}
                 >
                   <img
                     src={currentLang.flag}
-                    alt={currentLang.label}
+                    alt=""
+                    aria-label={currentLang.label}
                     className="rounded-circle"
-                    style={{ width: 22, height: 22, objectFit: 'cover' }}
+                    style={{ width: 22, height: 22, minWidth: 22, minHeight: 22, objectFit: 'cover', flexShrink: 0 }}
                   />
                 </a>
                 <div className="dropdown-wrapper dropdown-wrapper--small">
@@ -236,11 +244,12 @@ const Header = ({ onToggleSidebar }) => {
               <div className={`dropdown-custom ${openMenu === 'author' ? 'show' : ''}`}>
                 <a
                   href="#author"
-                  className="nav-item-toggle"
+                  className="nav-item-toggle d-flex align-items-center justify-content-center"
                   onClick={(e) => {
                     e.preventDefault();
                     setOpenMenu(openMenu === 'author' ? null : 'author');
                   }}
+                  style={{ width: 34, height: 34, flexShrink: 0 }}
                 >
                   <span className="author-initials">{initial}</span>
                 </a>

@@ -19,6 +19,14 @@ export const mainMenuItems = [
     path: '/confronto',
   },
   {
+    key: 'facturas',
+    textKey: 'navigation.facturas',
+    fallbackText: 'Leitor de Facturas (IA)',
+    text: 'Leitor de Facturas (IA)',
+    icon: 'la la-file-invoice-dollar',
+    path: '/facturas',
+  },
+  {
     key: 'arquivo',
     textKey: 'navigation.arquivo',
     fallbackText: 'Documentos & Arquivo',

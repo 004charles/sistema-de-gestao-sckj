@@ -4,7 +4,8 @@ from rest_framework.validators import UniqueValidator
 from .models import (
     Empresa, EmpresaUtilizador, Contabilidade, DeclaracaoAGT,
     Reconciliacao, ReconciliacaoDetalhe, MapeamentoConta,
-    DocumentoUpload, AnaliseIA, LancamentoContabilistico, LinhaLancamento
+    DocumentoUpload, AnaliseIA, LancamentoContabilistico, LinhaLancamento,
+    Factura
 )
 
 NIF_DUPLICADO_MSG = 'Já existe uma empresa registada com este NIF.'
@@ -217,4 +218,16 @@ class LancamentoContabilisticoSerializer(serializers.ModelSerializer):
                 )
         instance.save()
         return instance
+
+
+class FacturaSerializer(serializers.ModelSerializer):
+    empresa_nome = serializers.ReadOnlyField(source='empresa.nome')
+    empresa_nif = serializers.ReadOnlyField(source='empresa.nif')
+    documento_nome = serializers.ReadOnlyField(source='documento.nome_arquivo')
+    lancamento_numero = serializers.ReadOnlyField(source='lancamento.numero_diario')
+
+    class Meta:
+        model = Factura
+        fields = '__all__'
+
 

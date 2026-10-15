@@ -22,6 +22,13 @@ class SPAHandler(SimpleHTTPRequestHandler):
         self.path = '/index.html'
         return super().do_GET()
 
+    def do_HEAD(self):
+        clean_path = self.path.split('?')[0].split('#')[0]
+        full_path = os.path.normpath(os.path.join(BUILD_DIR, clean_path.lstrip('/')))
+        if not os.path.isfile(full_path):
+            self.path = '/index.html'
+        return super().do_HEAD()
+
 if __name__ == '__main__':
     server = HTTPServer(('0.0.0.0', PORT), SPAHandler)
     print(f"Frontend SPA rodando em http://0.0.0.0:{PORT}")
